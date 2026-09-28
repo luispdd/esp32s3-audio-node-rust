@@ -37,14 +37,23 @@ impl SystemStatus {
         }
     }
 
-    pub fn from_runtime_with_sd(wifi_connected: bool, sd_card: SdCardStatus) -> Self {
+    pub fn from_runtime_with_sensors(
+        wifi_connected: bool,
+        mic_detected: bool,
+        pir_detected: bool,
+        sd_card: SdCardStatus,
+    ) -> Self {
         Self {
             wifi: wifi_connected,
-            mic: true,
-            pir: false,
+            mic: mic_detected,
+            pir: pir_detected,
             sd: sd_card.is_mounted(),
             sd_card,
         }
+    }
+
+    pub fn from_runtime_with_sd(wifi_connected: bool, sd_card: SdCardStatus) -> Self {
+        Self::from_runtime_with_sensors(wifi_connected, true, false, sd_card)
     }
 
     pub fn summary_lines(&self) -> Vec<String> {
@@ -83,6 +92,26 @@ mod tests {
         assert!(summary[0].contains("wifi OK"));
         assert!(summary[0].contains("mic OK"));
         assert!(summary[1].contains("pir KO"));
+        assert!(summary[1].contains("sd OK"));
+    }
+
+    #[test]
+    fn from_runtime_with_sensors_sets_live_sensor_flags() {
+        let status = SystemStatus::from_runtime_with_sensors(
+            true,
+            false,
+            true,
+            SdCardStatus::Empty,
+        );
+        assert!(status.wifi);
+        assert!(!status.mic);
+        assert!(status.pir);
+        assert!(status.sd);
+
+        let summary = status.summary_lines();
+        assert!(summary[0].contains("wifi OK"));
+        assert!(summary[0].contains("mic KO"));
+        assert!(summary[1].contains("pir OK"));
         assert!(summary[1].contains("sd OK"));
     }
 

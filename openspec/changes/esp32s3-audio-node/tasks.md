@@ -25,10 +25,10 @@
 - [x] 2.5 Implement Button 1 (GPIO 5) long-press display power toggle: detect a long press on Button 1 to turn the OLED screen off instead of cycling modes. While the screen is turned off, a subsequent press turns the screen back on and restores the current display mode view.
 - [x] 2.6 Extract screen management into a dedicated `src/display.rs` module with a clear, extensible API. The module must be designed to support future additions of new modes and richer per-mode content without requiring changes to the core application loop.
 - [x] 2.7 Implement the SD_MODE screen. It will verify that the SD card exists and can be mounted, that the `/audio` folder exists, and then display the list of recorded files inside it. This is an initial view; future tasks will add file navigation, playback controls, and deletion.
-- [ ] 2.8 Implement the STATUS_MODE display. It will show the live state of each sensor: Wi-Fi connectivity, microphone signal presence (real I2S data, not a hardcoded value), PIR sensor activity (real GPIO poll, not a hardcoded false), and SD card availability. An initial real-hardware read of the PIR sensor and the microphone must be implemented to verify the functionality.
-- [ ] 2.9 Extract SD card management into a dedicated `src/sd.rs` module. Move `check_sd_card_is_writable` and related SD logic into this module and fix the existing bug where `Peripherals::take()` is called redundantly inside the probe function after the main app has already taken peripherals.
-- [ ] 2.10 Implement the Button 2 (Other): **GPIO 6** functionality. Will use it later, just log in the console when the button is pressed.
-- [ ] 2.11 Implement the Button 3 (Other): **GPIO 7** functionality. Will use it later, just log in the console when the button is pressed.
+- [x] 2.8 Implement the STATUS_MODE display. It will show the live state of each sensor: Wi-Fi connectivity, microphone signal presence (real I2S data, not a hardcoded value), PIR sensor activity (real GPIO poll, not a hardcoded false), and SD card availability. An initial real-hardware read of the PIR sensor and the microphone must be implemented to verify the functionality.
+- [x] 2.9 Extract SD card management into a dedicated `src/sd.rs` module. Move `check_sd_card_is_writable` and related SD logic into this module and fix the existing bug where `Peripherals::take()` is called redundantly inside the probe function after the main app has already taken peripherals.
+- [x] 2.10 Implement the Button 2 (Other): **GPIO 6** functionality. Will use it later, just log in the console when the button is pressed.
+- [x] 2.11 Implement the Button 3 (Other): **GPIO 7** functionality. Will use it later, just log in the console when the button is pressed.
 
 ## 3. Live Audio Streaming
 

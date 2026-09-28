@@ -33,7 +33,10 @@ CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_PER_FILE_CACHE=y
 
 # Audio path tuning for I2S capture and real-time processing
-CONFIG_I2S_ISR_IRAM_SAFE=y
+# Note: CONFIG_I2S_ISR_IRAM_SAFE must be disabled because esp-idf-hal event callbacks
+# are placed in flash, not IRAM. Enabling it causes i2s_channel_register_event_callback
+# to fail with ESP_ERR_INVALID_ARG.
+CONFIG_I2S_ISR_IRAM_SAFE=n
 
 # 8MB QSPI flash configuration for the ESP32-S3 WROOM board
 # Keep PSRAM in octal mode, but the SPI flash itself is QSPI on this module.

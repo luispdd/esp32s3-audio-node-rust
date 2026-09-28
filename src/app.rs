@@ -43,6 +43,7 @@ impl App {
             modem,
             pins,
             i2c0,
+            i2s0,
             spi3,
             ..
         } = peripherals;
@@ -96,15 +97,49 @@ impl App {
             }
         };
 
+        #[cfg(target_arch = "xtensa")]
+        let mut mic = crate::audio::Microphone::new(
+            i2s0,
+            pins.gpio14,
+            pins.gpio15,
+            pins.gpio16,
+        );
+
+        #[cfg(not(target_arch = "xtensa"))]
+        let mut mic = crate::audio::Microphone::new();
+
+        let initial_mic_status = match &mut mic {
+            Ok(m) => m.probe_signal(),
+            Err(err) => {
+                log::warn!("Microphone initialization skipped or failed: {err}");
+                false
+            }
+        };
+
+        let pir_sensor = PinDriver::input(pins.gpio3, Pull::Down)
+            .map_err(|err| format!("failed to configure PIR sensor on GPIO 3: {err}"))?;
+        let initial_pir_status = pir_sensor.is_high();
+
         let mode_button = PinDriver::input(pins.gpio5, Pull::Up)
             .map_err(|err| format!("failed to configure mode button on GPIO 5: {err}"))?;
+        let record_button = PinDriver::input(pins.gpio6, Pull::Up)
+            .map_err(|err| format!("failed to configure record button on GPIO 6: {err}"))?;
+        let other_button = PinDriver::input(pins.gpio7, Pull::Up)
+            .map_err(|err| format!("failed to configure other button on GPIO 7: {err}"))?;
 
         let mut current_mode = DeviceMode::Status;
         let mut button_controller =
             ModeButtonController::new(ModeButtonController::DEFAULT_LONG_PRESS_DURATION);
 
-        let mut system_status =
-            SystemStatus::from_runtime_with_sd(connection.connected, sd_status.clone());
+        let mut button2_was_pressed = false;
+        let mut button3_was_pressed = false;
+
+        let mut system_status = SystemStatus::from_runtime_with_sensors(
+            connection.connected,
+            initial_mic_status,
+            initial_pir_status,
+            sd_status.clone(),
+        );
         display.render(current_mode, &connection, &system_status)?;
 
         log::info!("WiFi credentials loaded from the embedded credential module.");
@@ -120,6 +155,9 @@ impl App {
             DeviceMode::Sd.as_str()
         );
         log::info!("Mode button is active-low and configured on GPIO 5 with internal pull-up enabled.");
+        log::info!("Record button (Button 2) configured on GPIO 6 with internal pull-up enabled.");
+        log::info!("Other button (Button 3) configured on GPIO 7 with internal pull-up enabled.");
+        log::info!("PIR sensor input configured on GPIO 3 with pull-down enabled.");
 
         loop {
             let pressed = mode_button.is_low();
@@ -144,24 +182,48 @@ impl App {
                 ModeButtonAction::None => {}
             }
 
+            let b2_pressed = record_button.is_low();
+            if b2_pressed && !button2_was_pressed {
+                log::info!("Button 2 (GPIO 6) pressed: Record button triggered");
+            }
+            button2_was_pressed = b2_pressed;
+
+            let b3_pressed = other_button.is_low();
+            if b3_pressed && !button3_was_pressed {
+                log::info!("Button 3 (GPIO 7) pressed: Other button triggered");
+            }
+            button3_was_pressed = b3_pressed;
+
+            let pir_detected = pir_sensor.is_high();
+            let mic_detected = match &mut mic {
+                Ok(m) => m.probe_signal(),
+                Err(_) => false,
+            };
+
             if display.is_on() {
                 if current_mode == DeviceMode::Sd {
                     if let Ok(card) = &sd_card {
                         sd_status = card.inspect();
                     }
                 }
-                system_status =
-                    SystemStatus::from_runtime_with_sd(connection.connected, sd_status.clone());
+                system_status = SystemStatus::from_runtime_with_sensors(
+                    connection.connected,
+                    mic_detected,
+                    pir_detected,
+                    sd_status.clone(),
+                );
                 display.render(current_mode, &connection, &system_status)?;
             }
 
             if !pressed {
                 log::info!(
-                    "Mode {} status (display {}): WiFi connected to {} via DHCP {}",
+                    "Mode {} status (display {}): WiFi: {}, Mic: {}, PIR: {}, SD: {}",
                     current_mode.as_str(),
                     if display.is_on() { "ON" } else { "OFF" },
-                    connection.ssid,
-                    connection.ip
+                    if connection.connected { "OK" } else { "KO" },
+                    if mic_detected { "OK" } else { "KO" },
+                    if pir_detected { "ACTIVE" } else { "IDLE" },
+                    if sd_status.is_mounted() { "OK" } else { "KO" },
                 );
             }
 
