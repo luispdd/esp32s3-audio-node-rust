@@ -116,3 +116,18 @@ pub fn wifi_credentials() -> Result<WifiCredentials, String> {
         password: password.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn wifi_connection_reports_connection_and_dhcp_ip() {
+        let connection = WifiConnection::connect("AudioNodeLab", "secret-pass").unwrap();
+
+        assert_eq!(connection.ssid, "AudioNodeLab");
+        assert!(connection.connected);
+        assert!(connection.ip.contains('.'));
+        assert!(connection.status_line.contains("AudioNodeLab"));
+        assert!(connection.status_line.contains(connection.ip.as_str()));
+    }
+}

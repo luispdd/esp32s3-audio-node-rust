@@ -11,7 +11,7 @@
 - [x] 2.1 Implement the wifi connection process and verify it by displaying in the screen the current IP address obtained by the DHCP local network's router.
 - [x] 2.2 Implement the Button 1 (Mode): **GPIO 5** functionality. It will initially just switch from STATUS_MODE to LIVE_MODE and SD_MODE.
 - [x] 2.3 Implement the initial display of information in the OLED screen for the LIVE_MODE, displaying the title 'LIVE_MODE' and the current IP address of the device.
-- [ ] 2.4 Refactor the project source structure to follow Rust best practices for modularity and maintainability. The current `src/app.rs` (460+ lines) is a clear code smell — it conflates hardware types, domain logic, display rendering, SD probing, audio types, and application orchestration in a single file. The target module layout is:
+- [x] 2.4 Refactor the project source structure to follow Rust best practices for modularity and maintainability. The current `src/app.rs` (460+ lines) is a clear code smell — it conflates hardware types, domain logic, display rendering, SD probing, audio types, and application orchestration in a single file. The target module layout is:
   - `src/modes.rs` — `DeviceMode` enum and its cycling/display logic
   - `src/status.rs` — `SystemStatus` struct and its sensor aggregation helpers
   - `src/display.rs` — OLED probe, initialization, and per-mode rendering (see task 2.5)

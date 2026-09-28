@@ -1,7 +1,12 @@
 mod app;
+pub mod audio;
 mod config;
 mod credential;
+pub mod display;
+pub mod modes;
 mod network;
+pub mod sd;
+pub mod status;
 
 fn main() {
     // It is necessary to call this function once. Otherwise, some patches to the runtime
