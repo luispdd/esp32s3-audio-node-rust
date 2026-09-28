@@ -12,7 +12,7 @@ This proposal follows the hardware baseline defined in the project’s initial s
 - Keep the final product scope full-featured while delivering it in a practical sequence: live stream first, then SD-card recording, then playback from stored files.
 - Store Wi-Fi credentials in a local, git-ignored config file so source code remains portable and safe.
 - Preserve the hardware contract defined in the original design: INMP441 on GPIO 14/15/16, SD SPI on GPIO 12/11/13/10, OLED I2C on GPIO 8/9, PIR on GPIO 3, ADC gain control on GPIO 4, and buttons on GPIO 5/6/7 while avoiding GPIO 33-37.
-- Implement a device mode system (STATUS_MODE, LIVE_MODE, SD_MODE) driven by Button 1 (GPIO 5), with a dedicated OLED display layout per mode and progressive sensor and file information as features are completed.
+- Implement a device mode system (STATUS_MODE, LIVE_MODE, SD_MODE) driven by Button 1 (GPIO 5), with a dedicated OLED display layout per mode, short-press mode rotation, and long-press display power toggling (off/on).
 - Extract screen management into `src/display.rs` and SD card management into `src/sd.rs` to maintain a clean, extensible module boundary as the codebase grows.
 
 ## Capabilities

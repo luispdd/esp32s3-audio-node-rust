@@ -8,10 +8,25 @@ use embedded_graphics::{
 };
 use esp_idf_svc::hal::delay::BLOCK;
 use esp_idf_svc::hal::i2c::I2cDriver;
+use ssd1306::prelude::*;
+use ssd1306::Ssd1306;
 
 use crate::modes::DeviceMode;
 use crate::network::WifiConnection;
 use crate::status::SystemStatus;
+
+pub fn set_display_power<DI, SIZE, MODE>(
+    display: &mut Ssd1306<DI, SIZE, MODE>,
+    on: bool,
+) -> Result<(), String>
+where
+    DI: WriteOnlyDataCommand,
+    SIZE: DisplaySize,
+{
+    display
+        .set_display_on(on)
+        .map_err(|err| format!("failed to set OLED display power state to {on}: {:?}", err))
+}
 
 pub fn probe_oled_display(i2c: &mut I2cDriver<'_>) -> Result<(), String> {
     for address in [0x3c_u8, 0x3d_u8] {

@@ -45,7 +45,7 @@ This keeps the product complete in scope while reducing risk and validating the 
 
 ### 6. Introduce a device mode system before the audio pipeline
 Before the audio pipeline is wired up, the firmware goes through a dedicated system bootstrap phase that establishes the interactive skeleton of the device:
-- Three device modes are defined: STATUS_MODE, LIVE_MODE, and SD_MODE. Button 1 (GPIO 5) cycles through them.
+- Three device modes are defined: STATUS_MODE, LIVE_MODE, and SD_MODE. Button 1 (GPIO 5) cycles through them on a short press. A long press on Button 1 turns the OLED screen off; subsequent presses turn the screen back on and restore the active mode view.
 - Each mode drives a distinct OLED display layout. LIVE_MODE shows the title and the DHCP IP. SD_MODE verifies the SD card and eventually shows the audio file list. STATUS_MODE shows live sensor readings: Wi-Fi, microphone signal, PIR activity, and SD availability.
 - Screen management is extracted into a dedicated `src/display.rs` module with an extensible, mode-driven API so that future mode additions and richer content do not require changes to the core application loop.
 - SD card probing and lifecycle management are extracted into a dedicated `src/sd.rs` module. This fixes a startup-ordering bug where the probe function attempted to re-acquire the hardware peripherals after the main application had already taken them.
@@ -68,7 +68,7 @@ The target layout separates concerns into focused modules:
 - `src/app.rs` — thin orchestration: wires modules and owns the main loop
 - `src/main.rs` — entry point, unchanged
 
-This refactoring produces no behavioral change and does not touch the hardware at runtime. All existing tests are relocated to their home modules and must continue to pass. The restructuring is a prerequisite for tasks 2.5 through 2.10 to remain tractable as the codebase grows.
+This refactoring produces no behavioral change and does not touch the hardware at runtime. All existing tests are relocated to their home modules and must continue to pass. The restructuring is a prerequisite for tasks 2.5 through 2.11 to remain tractable as the codebase grows.
 
 **Alternative considered:** continuing to grow `src/app.rs` until it is too large to navigate. Rejected because the compound growth of display, SD, audio, and networking concerns will make the file unmaintainable before the audio pipeline phase is complete.
 

@@ -60,3 +60,19 @@ The system SHALL provide the minimal browser-facing functionality required to ac
 #### Scenario: Browser receives no external dependency UI
 - **WHEN** the device serves browser content
 - **THEN** the served content SHALL be self-contained and not require non-local external assets or separate services
+
+### Requirement: Button 1 controls mode switching and display power
+The system SHALL use Button 1 (GPIO 5) to cycle between device modes on a short press, and to toggle the OLED display power state on a long press.
+
+#### Scenario: Short press cycles device modes while screen is active
+- **WHEN** Button 1 is pressed and released before reaching the long-press threshold while the screen is on
+- **THEN** the system SHALL advance to the next device mode in sequence
+
+#### Scenario: Long press turns the screen off
+- **WHEN** Button 1 is held down for at least the long-press threshold while the screen is on
+- **THEN** the system SHALL turn off the OLED display without cycling the device mode
+
+#### Scenario: Press turns the screen back on
+- **WHEN** Button 1 is pressed while the screen is turned off
+- **THEN** the system SHALL turn on the OLED display and restore the current mode view
+

@@ -14,20 +14,21 @@
 - [x] 2.4 Refactor the project source structure to follow Rust best practices for modularity and maintainability. The current `src/app.rs` (460+ lines) is a clear code smell — it conflates hardware types, domain logic, display rendering, SD probing, audio types, and application orchestration in a single file. The target module layout is:
   - `src/modes.rs` — `DeviceMode` enum and its cycling/display logic
   - `src/status.rs` — `SystemStatus` struct and its sensor aggregation helpers
-  - `src/display.rs` — OLED probe, initialization, and per-mode rendering (see task 2.5)
-  - `src/sd.rs` — SD card lifecycle and probe logic (see task 2.8)
+  - `src/display.rs` — OLED probe, initialization, and per-mode rendering (see task 2.6)
+  - `src/sd.rs` — SD card lifecycle and probe logic (see task 2.9)
   - `src/audio/mod.rs` — audio module root
   - `src/audio/frame.rs` — `AudioFrame` data type
   - `src/audio/stream.rs` — `LiveAudioStream` and stub capture logic
   - `src/app.rs` — thin orchestration only: takes peripherals, wires modules together, runs the main loop
   - `src/main.rs` — entry point, unchanged
   All existing unit tests must be relocated to their respective modules and continue to pass. No behavioral changes should be introduced by this task.
-- [ ] 2.5 Extract screen management into a dedicated `src/display.rs` module with a clear, extensible API. The module must be designed to support future additions of new modes and richer per-mode content without requiring changes to the core application loop.
-- [ ] 2.6 Implement the SD_MODE screen. It will verify that the SD card exists and can be mounted, that the `/audio` folder exists, and then display the list of recorded files inside it. This is an initial view; future tasks will add file navigation, playback controls, and deletion.
-- [ ] 2.7 Implement the STATUS_MODE display. It will show the live state of each sensor: Wi-Fi connectivity, microphone signal presence (real I2S data, not a hardcoded value), PIR sensor activity (real GPIO poll, not a hardcoded false), and SD card availability. An initial real-hardware read of the PIR sensor and the microphone must be implemented to verify the functionality.
-- [ ] 2.8 Extract SD card management into a dedicated `src/sd.rs` module. Move `check_sd_card_is_writable` and related SD logic into this module and fix the existing bug where `Peripherals::take()` is called redundantly inside the probe function after the main app has already taken peripherals.
-- [ ] 2.9 Implement the Button 2 (Other): **GPIO 6** functionality. Will use it later, just log in the console when the button is pressed.
-- [ ] 2.10 Implement the Button 3 (Other): **GPIO 7** functionality. Will use it later, just log in the console when the button is pressed.
+- [x] 2.5 Implement Button 1 (GPIO 5) long-press display power toggle: detect a long press on Button 1 to turn the OLED screen off instead of cycling modes. While the screen is turned off, a subsequent press turns the screen back on and restores the current display mode view.
+- [ ] 2.6 Extract screen management into a dedicated `src/display.rs` module with a clear, extensible API. The module must be designed to support future additions of new modes and richer per-mode content without requiring changes to the core application loop.
+- [ ] 2.7 Implement the SD_MODE screen. It will verify that the SD card exists and can be mounted, that the `/audio` folder exists, and then display the list of recorded files inside it. This is an initial view; future tasks will add file navigation, playback controls, and deletion.
+- [ ] 2.8 Implement the STATUS_MODE display. It will show the live state of each sensor: Wi-Fi connectivity, microphone signal presence (real I2S data, not a hardcoded value), PIR sensor activity (real GPIO poll, not a hardcoded false), and SD card availability. An initial real-hardware read of the PIR sensor and the microphone must be implemented to verify the functionality.
+- [ ] 2.9 Extract SD card management into a dedicated `src/sd.rs` module. Move `check_sd_card_is_writable` and related SD logic into this module and fix the existing bug where `Peripherals::take()` is called redundantly inside the probe function after the main app has already taken peripherals.
+- [ ] 2.10 Implement the Button 2 (Other): **GPIO 6** functionality. Will use it later, just log in the console when the button is pressed.
+- [ ] 2.11 Implement the Button 3 (Other): **GPIO 7** functionality. Will use it later, just log in the console when the button is pressed.
 
 ## 3. Live Audio Streaming
 

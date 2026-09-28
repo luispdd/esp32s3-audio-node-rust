@@ -12,8 +12,8 @@ use esp_idf_svc::hal::units::*;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
 use crate::config::Config;
-use crate::display::{probe_oled_display, render_mode_screen};
-use crate::modes::DeviceMode;
+use crate::display::{probe_oled_display, render_mode_screen, set_display_power};
+use crate::modes::{DeviceMode, ModeButtonAction, ModeButtonController};
 use crate::network::{wifi_credentials, WifiConnection};
 use crate::status::SystemStatus;
 
@@ -83,12 +83,17 @@ impl App {
         display
             .init()
             .map_err(|err| format!("failed to initialize SSD1306 OLED display: {:?}", err))?;
+        display
+            .set_display_on(true)
+            .map_err(|err| format!("failed to turn on display: {:?}", err))?;
 
         let mode_button = PinDriver::input(pins.gpio5, Pull::Up)
             .map_err(|err| format!("failed to configure mode button on GPIO 5: {err}"))?;
 
         let mut current_mode = DeviceMode::Status;
-        let mut last_pressed = false;
+        let mut display_on = true;
+        let mut button_controller =
+            ModeButtonController::new(ModeButtonController::DEFAULT_LONG_PRESS_DURATION);
 
         let text_style = MonoTextStyleBuilder::new()
             .font(&FONT_6X10)
@@ -108,7 +113,7 @@ impl App {
         log::info!("Initial device mode: {}", current_mode.as_str());
         log::info!("Display status: {}", connection.screen_status());
         log::info!(
-            "Mode button state machine: {} -> {} -> {}",
+            "Mode button state machine: {} -> {} -> {} (short press cycles mode, long press toggles display power)",
             DeviceMode::Status.as_str(),
             DeviceMode::Live.as_str(),
             DeviceMode::Sd.as_str()
@@ -117,27 +122,42 @@ impl App {
 
         loop {
             let pressed = mode_button.is_low();
-            if pressed && !last_pressed {
-                let previous_mode = current_mode;
-                current_mode = current_mode.next();
-                log::info!(
-                    "Mode switch on GPIO 5: {} -> {}",
-                    previous_mode.as_str(),
-                    current_mode.as_str()
-                );
+            match button_controller.update(pressed, display_on) {
+                ModeButtonAction::CycleMode => {
+                    let previous_mode = current_mode;
+                    current_mode = current_mode.next();
+                    log::info!(
+                        "Mode switch on GPIO 5: {} -> {}",
+                        previous_mode.as_str(),
+                        current_mode.as_str()
+                    );
+                }
+                ModeButtonAction::TurnScreenOff => {
+                    log::info!("Button 1 long press: turning OLED display off");
+                    display_on = false;
+                    set_display_power(&mut display, false)?;
+                }
+                ModeButtonAction::TurnScreenOn => {
+                    log::info!("Button 1 press: turning OLED display on");
+                    display_on = true;
+                    set_display_power(&mut display, true)?;
+                }
+                ModeButtonAction::None => {}
             }
-            last_pressed = pressed;
 
-            system_status = SystemStatus::from_runtime(connection.connected);
-            render_mode_screen(&mut display, current_mode, &connection, &system_status, text_style)?;
-            display
-                .flush()
-                .map_err(|err| format!("failed to flush OLED mode update: {:?}", err))?;
+            if display_on {
+                system_status = SystemStatus::from_runtime(connection.connected);
+                render_mode_screen(&mut display, current_mode, &connection, &system_status, text_style)?;
+                display
+                    .flush()
+                    .map_err(|err| format!("failed to flush OLED mode update: {:?}", err))?;
+            }
 
             if !pressed {
                 log::info!(
-                    "Mode {} status: WiFi connected to {} via DHCP {}",
+                    "Mode {} status (display {}): WiFi connected to {} via DHCP {}",
                     current_mode.as_str(),
+                    if display_on { "ON" } else { "OFF" },
                     connection.ssid,
                     connection.ip
                 );
