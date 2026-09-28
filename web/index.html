@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32-S3 Audio Node - Live Stream</title>
+<style>
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: #0d1117;
+  color: #c9d1d9;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  max-width: 480px;
+  width: 100%;
+  padding: 2rem;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: #f0f6fc;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: rgba(35, 134, 54, 0.2);
+  color: #3fb950;
+  border: 1px solid #238636;
+}
+.pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3fb950;
+  box-shadow: 0 0 8px #3fb950;
+}
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+.info-box {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 0.75rem;
+}
+.info-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: #8b949e;
+  margin-bottom: 2px;
+}
+.info-value {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #e6edf3;
+}
+canvas {
+  width: 100%;
+  height: 96px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  margin-bottom: 1.25rem;
+}
+.player-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+button {
+  background: #238636;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.75rem 1.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+button:hover { background: #2ea043; }
+button:active { background: #1f772e; }
+.btn-stop { background: #da3633; }
+.btn-stop:hover { background: #e5534b; }
+audio {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+.direct-link {
+  display: block;
+  text-align: center;
+  margin-top: 1rem;
+  font-size: 0.8rem;
+  color: #58a6ff;
+  text-decoration: none;
+}
+.direct-link:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="header">
+    <h1>Audio Node</h1>
+    <div class="badge"><span class="pulse"></span> LIVE</div>
+  </div>
+  <div class="info-grid">
+    <div class="info-box">
+      <div class="info-label">Sample Rate</div>
+      <div class="info-value">16,000 Hz</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">Format</div>
+      <div class="info-value">16-bit PCM (Mono)</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">Microphone</div>
+      <div class="info-value">INMP441 (I2S)</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">Endpoint</div>
+      <div class="info-value">{{ENDPOINT}}</div>
+    </div>
+  </div>
+
+  <canvas id="viz"></canvas>
+
+  <div class="player-controls">
+    <button id="toggleBtn" onclick="togglePlay()">Play Live Stream</button>
+    <audio id="audio" controls preload="none" src="{{ENDPOINT}}"></audio>
+  </div>
+  <a class="direct-link" href="{{ENDPOINT}}" target="_blank">Direct Stream Link: {{ENDPOINT}}</a>
+</div>
+
+<script>
+const audio = document.getElementById('audio');
+const btn = document.getElementById('toggleBtn');
+const canvas = document.getElementById('viz');
+const ctx = canvas.getContext('2d');
+let audioCtx = null;
+let analyser = null;
+let animId = null;
+
+function setupAudioContext() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 64;
+    const source = audioCtx.createMediaElementSource(audio);
+    source.connect(analyser);
+    analyser.connect(audioCtx.destination);
+  } catch (e) {
+    console.warn("Web Audio API visualizer skipped:", e);
+  }
+}
+
+function drawVisualizer() {
+  animId = requestAnimationFrame(drawVisualizer);
+  const width = canvas.width = canvas.offsetWidth;
+  const height = canvas.height = canvas.offsetHeight;
+  ctx.clearRect(0, 0, width, height);
+
+  if (!analyser) {
+    // Idle wave animation
+    ctx.strokeStyle = '#30363d';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, height / 2);
+    ctx.lineTo(width, height / 2);
+    ctx.stroke();
+    return;
+  }
+
+  const dataArray = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(dataArray);
+
+  const barWidth = (width / dataArray.length) - 2;
+  let x = 1;
+  for (let i = 0; i < dataArray.length; i++) {
+    const barHeight = (dataArray[i] / 255) * (height - 8);
+    ctx.fillStyle = '#3fb950';
+    ctx.fillRect(x, height - barHeight - 4, barWidth, barHeight);
+    x += barWidth + 2;
+  }
+}
+
+function togglePlay() {
+  setupAudioContext();
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+
+  if (audio.paused) {
+    // Append timestamp to ensure fresh HTTP connection
+    audio.src = "{{ENDPOINT}}?t=" + Date.now();
+    audio.play().then(() => {
+      btn.textContent = "Pause Stream";
+      btn.className = "btn-stop";
+      drawVisualizer();
+    }).catch(err => {
+      console.error("Playback failed:", err);
+    });
+  } else {
+    audio.pause();
+    btn.textContent = "Play Live Stream";
+    btn.className = "";
+    if (animId) cancelAnimationFrame(animId);
+  }
+}
+
+audio.addEventListener('play', () => {
+  btn.textContent = "Pause Stream";
+  btn.className = "btn-stop";
+  setupAudioContext();
+  drawVisualizer();
+});
+
+audio.addEventListener('pause', () => {
+  btn.textContent = "Play Live Stream";
+  btn.className = "";
+  if (animId) cancelAnimationFrame(animId);
+});
+
+drawVisualizer();
+</script>
+</body>
+</html>

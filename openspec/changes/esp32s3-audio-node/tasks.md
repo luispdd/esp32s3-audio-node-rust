@@ -32,9 +32,9 @@
 
 ## 3. Live Audio Streaming
 
-- [ ] 3.1 Implement the microphone capture path and buffer management for live audio samples and verify audio frames are produced continuously
-- [ ] 3.2 Implement the browser-accessible live stream endpoint or minimal serving page and verify a browser can connect to the device over Wi-Fi
-- [ ] 3.3 Deliver the live audio payload to the client and verify playback is audible in the browser without external resources
+- [x] 3.1 Implement the microphone capture path and buffer management for live audio samples and verify audio frames are produced continuously
+- [x] 3.2 Implement the browser-accessible live stream endpoint or minimal serving page and verify a browser can connect to the device over Wi-Fi
+- [x] 3.3 Deliver the live audio payload to the client and verify playback is audible in the browser without external resources
 
 ## 4. Recording to SD Card
 

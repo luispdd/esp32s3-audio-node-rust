@@ -97,6 +97,8 @@ impl App {
             }
         };
 
+        let audio_buffer = crate::audio::SharedAudioBuffer::new(50);
+
         #[cfg(target_arch = "xtensa")]
         let mut mic = crate::audio::Microphone::new(
             i2s0,
@@ -115,6 +117,61 @@ impl App {
                 false
             }
         };
+
+        // Start real-time audio capture worker on Core 1 if microphone is initialized
+        let capture_buffer = audio_buffer.clone();
+        let _capture_thread = if let Ok(mut active_mic) = mic {
+            #[cfg(target_arch = "xtensa")]
+            {
+                use esp_idf_svc::hal::cpu::Core;
+                use esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration;
+                let thread_config = ThreadSpawnConfiguration {
+                    name: Some(c"audio-capture"),
+                    stack_size: 8192,
+                    priority: 15,
+                    pin_to_core: Some(Core::Core1),
+                    ..Default::default()
+                };
+                let _ = thread_config.set();
+            }
+
+            Some(
+                std::thread::Builder::new()
+                    .name("audio-capture".into())
+                    .stack_size(8192)
+                    .spawn(move || {
+                        log::info!("Audio capture worker thread started on Core 1");
+                        loop {
+                            match active_mic.read_frame(320, 50) {
+                                Ok(frame) => {
+                                    capture_buffer.push_frame(frame);
+                                }
+                                Err(err) => {
+                                    log::warn!("Microphone read error: {err}");
+                                    thread::sleep(Duration::from_millis(20));
+                                }
+                            }
+                        }
+                    })
+                    .map_err(|err| format!("Failed to spawn audio capture thread: {err}")),
+            )
+        } else {
+            None
+        };
+
+        // Start live audio HTTP server on Core 0
+        let _http_server = crate::audio::LiveAudioStream::start_server(audio_buffer.clone(), 80);
+        match &_http_server {
+            Ok(_) => {
+                log::info!(
+                    "Live audio streaming server running at http://{}/ (and /stream.wav)",
+                    connection.ip
+                );
+            }
+            Err(err) => {
+                log::warn!("Live audio streaming server failed to start: {err}");
+            }
+        }
 
         let pir_sensor = PinDriver::input(pins.gpio3, Pull::Down)
             .map_err(|err| format!("failed to configure PIR sensor on GPIO 3: {err}"))?;
@@ -195,10 +252,7 @@ impl App {
             button3_was_pressed = b3_pressed;
 
             let pir_detected = pir_sensor.is_high();
-            let mic_detected = match &mut mic {
-                Ok(m) => m.probe_signal(),
-                Err(_) => false,
-            };
+            let mic_detected = audio_buffer.is_signal_present();
 
             if display.is_on() {
                 if current_mode == DeviceMode::Sd {

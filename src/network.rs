@@ -79,6 +79,9 @@ impl WifiConnection {
         let ip = format!("{}", ip_info.ip);
         let status_line = format!("WiFi {}: connected | DHCP {}", ssid.trim(), ip);
 
+        // Keep the Wi-Fi peripheral driver active for the device runtime
+        std::mem::forget(wifi);
+
         Ok(Self {
             ssid: ssid.trim().to_string(),
             ip,
