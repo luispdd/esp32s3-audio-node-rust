@@ -1,81 +1,243 @@
+use std::path::Path;
+
+#[cfg(target_arch = "xtensa")]
 use esp_idf_svc::fs::fatfs::Fatfs;
-use esp_idf_svc::hal::gpio::AnyIOPin;
-use esp_idf_svc::hal::peripherals::Peripherals;
+#[cfg(target_arch = "xtensa")]
+use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio10, Gpio11, Gpio12, Gpio13};
+#[cfg(target_arch = "xtensa")]
 use esp_idf_svc::hal::sd::{spi::SdSpiHostDriver, SdCardConfiguration, SdCardDriver};
-use esp_idf_svc::hal::spi::{config::DriverConfig, Dma, SpiDriver};
+#[cfg(target_arch = "xtensa")]
+use esp_idf_svc::hal::spi::{config::DriverConfig, Dma, SpiDriver, SPI3};
+#[cfg(target_arch = "xtensa")]
 use esp_idf_svc::io::vfs::MountedFatfs;
 
+pub const SD_MOUNT_POINT: &str = "/sdcard";
+pub const SD_AUDIO_DIR: &str = "/sdcard/audio";
+
+/// Represents the high-level state of the SD card and its `/audio` directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SdCardStatus {
+    /// SD card is missing or could not be mounted.
+    Unavailable(String),
+    /// SD card is mounted, but the `/audio` directory could not be created.
+    FolderCreateFailed(String),
+    /// SD card is mounted, but the `/audio` directory does not exist.
+    FolderMissing,
+    /// SD card is mounted and `/audio` exists, but has no recorded files.
+    Empty,
+    /// SD card is mounted, `/audio` exists, and contains recorded files.
+    Files(Vec<String>),
+}
+
+impl SdCardStatus {
+    pub fn is_mounted(&self) -> bool {
+        !matches!(self, Self::Unavailable(_))
+    }
+
+    pub fn file_count(&self) -> usize {
+        match self {
+            Self::Files(files) => files.len(),
+            _ => 0,
+        }
+    }
+}
+
+/// Inspects a given path to check if it exists as an audio folder and returns its status.
+/// If the folder is missing, attempts to create it; if creation fails, returns an error status.
+pub fn inspect_audio_folder(audio_dir_path: &str) -> SdCardStatus {
+    let path = Path::new(audio_dir_path);
+    let resolved_path = if path.exists() {
+        path
+    } else if Path::new("/audio").exists() {
+        Path::new("/audio")
+    } else {
+        if let Err(err) = std::fs::create_dir_all(path) {
+            log::warn!("Failed to create audio folder {audio_dir_path}: {err}");
+            return SdCardStatus::FolderCreateFailed(format!("mkdir error: {err}"));
+        }
+        log::info!("Created missing audio folder at {audio_dir_path}");
+        path
+    };
+
+    if !resolved_path.is_dir() {
+        return SdCardStatus::FolderCreateFailed("path is not a dir".to_string());
+    }
+
+    match std::fs::read_dir(resolved_path) {
+        Ok(entries) => {
+            let mut files: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            files.sort();
+            if files.is_empty() {
+                SdCardStatus::Empty
+            } else {
+                SdCardStatus::Files(files)
+            }
+        }
+        Err(err) => {
+            log::warn!("Failed to read audio directory {audio_dir_path}: {err}");
+            SdCardStatus::Unavailable(format!("read error: {err}"))
+        }
+    }
+}
+
+/// Ensures the `/audio` directory exists on the SD card.
+pub fn ensure_audio_folder(audio_dir_path: &str) -> Result<(), String> {
+    let path = Path::new(audio_dir_path);
+    if !path.exists() {
+        std::fs::create_dir_all(path)
+            .map_err(|err| format!("failed to create audio folder {audio_dir_path}: {err}"))?;
+    }
+    Ok(())
+}
+
+/// Backward-compatible probe helper checking whether `/sdcard` is mounted and writable.
 pub fn check_sd_card_is_writable() -> bool {
-    #[cfg(not(target_arch = "xtensa"))]
-    {
+    let path = Path::new(SD_MOUNT_POINT);
+    if !path.exists() {
         return false;
     }
 
-    #[cfg(target_arch = "xtensa")]
-    {
-        let peripherals = match Peripherals::take() {
-            Ok(peripherals) => peripherals,
-            Err(err) => {
-                log::warn!("SD card probe skipped: unable to access ESP peripherals: {err}");
-                return false;
-            }
-        };
+    let probe_file = format!("{}/.probe", SD_MOUNT_POINT);
+    if std::fs::write(&probe_file, b"ok").is_ok() {
+        let _ = std::fs::remove_file(&probe_file);
+        true
+    } else {
+        false
+    }
+}
 
-        let pins = peripherals.pins;
+#[cfg(target_arch = "xtensa")]
+pub type SdCardMounted<'a> = MountedFatfs<Fatfs<SdCardDriver<SdSpiHostDriver<'a, SpiDriver<'a>>>>>;
 
-        let spi_driver = match SpiDriver::new(
-            peripherals.spi3,
-            pins.gpio12,
-            pins.gpio11,
-            Some(pins.gpio13),
+#[cfg(target_arch = "xtensa")]
+pub struct SdCard<'a> {
+    _mounted: SdCardMounted<'a>,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl<'a> SdCard<'a> {
+    pub fn mount(
+        spi: SPI3<'a>,
+        sck: Gpio12<'a>,
+        mosi: Gpio11<'a>,
+        miso: Gpio13<'a>,
+        cs: Gpio10<'a>,
+    ) -> Result<Self, String> {
+        let spi_driver = SpiDriver::new(
+            spi,
+            sck,
+            mosi,
+            Some(miso),
             &DriverConfig::default().dma(Dma::Auto(4096)),
-        ) {
-            Ok(driver) => driver,
-            Err(err) => {
-                log::warn!("SD card probe skipped: SPI bus init failed: {err}");
-                return false;
-            }
-        };
+        )
+        .map_err(|err| format!("SPI bus init failed: {err}"))?;
 
-        let sd_host = match SdSpiHostDriver::new(
+        let sd_host = SdSpiHostDriver::new(
             spi_driver,
-            Some(pins.gpio10),
+            Some(cs),
             AnyIOPin::none(),
             AnyIOPin::none(),
             AnyIOPin::none(),
             None,
-        ) {
-            Ok(host) => host,
-            Err(err) => {
-                log::warn!("SD card probe skipped: SD host init failed: {err}");
-                return false;
-            }
-        };
+        )
+        .map_err(|err| format!("SD host init failed: {err}"))?;
 
-        let sd_card_driver = match SdCardDriver::new_spi(sd_host, &SdCardConfiguration::new()) {
-            Ok(card) => card,
-            Err(err) => {
-                log::warn!("SD card probe skipped: SD card init failed: {err}");
-                return false;
-            }
-        };
+        let sd_card_driver = SdCardDriver::new_spi(sd_host, &SdCardConfiguration::new())
+            .map_err(|err| format!("SD card init failed: {err}"))?;
 
-        let mounted = match Fatfs::new_sdcard(0, sd_card_driver) {
-            Ok(fatfs) => match MountedFatfs::mount(fatfs, "/sdcard", 4) {
-                Ok(mounted) => mounted,
-                Err(err) => {
-                    log::warn!("SD card probe skipped: SD FATFS mount failed: {err}");
-                    return false;
-                }
-            },
-            Err(err) => {
-                log::warn!("SD card probe skipped: FATFS driver init failed: {err}");
-                return false;
-            }
-        };
+        let fatfs = Fatfs::new_sdcard(0, sd_card_driver)
+            .map_err(|err| format!("FATFS driver init failed: {err}"))?;
 
-        drop(mounted);
-        log::info!("Real SD card mount probe succeeded on /sdcard");
-        true
+        let mounted = MountedFatfs::mount(fatfs, SD_MOUNT_POINT, 4)
+            .map_err(|err| format!("SD FATFS mount failed: {err}"))?;
+
+        log::info!("MicroSD card mounted at {}", SD_MOUNT_POINT);
+        Ok(Self { _mounted: mounted })
+    }
+
+    pub fn inspect(&self) -> SdCardStatus {
+        inspect_audio_folder(SD_AUDIO_DIR)
+    }
+}
+
+#[cfg(not(target_arch = "xtensa"))]
+pub struct SdCard;
+
+#[cfg(not(target_arch = "xtensa"))]
+impl SdCard {
+    pub fn inspect(&self) -> SdCardStatus {
+        inspect_audio_folder(SD_AUDIO_DIR)
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn inspect_missing_folder_creates_it_and_reports_empty() {
+        let missing = "/tmp/test_missing_dir_sd_audio_12345";
+        let _ = fs::remove_dir_all(missing);
+        assert!(!Path::new(missing).exists());
+        assert_eq!(inspect_audio_folder(missing), SdCardStatus::Empty);
+        assert!(Path::new(missing).is_dir());
+        let _ = fs::remove_dir_all(missing);
+    }
+
+    #[test]
+    fn inspect_missing_folder_failure_reports_create_failed() {
+        let file_blocker = "/tmp/test_file_blocker_12345";
+        let _ = fs::write(file_blocker, b"content");
+        let invalid_path = format!("{file_blocker}/audio");
+        let status = inspect_audio_folder(&invalid_path);
+        match status {
+            SdCardStatus::FolderCreateFailed(_) => {}
+            other => panic!("expected FolderCreateFailed, got {:?}", other),
+        }
+        let _ = fs::remove_file(file_blocker);
+    }
+
+    #[test]
+    fn inspect_empty_folder_reports_empty() {
+        let empty_dir = "/tmp/test_empty_sd_audio_12345";
+        let _ = fs::create_dir_all(empty_dir);
+        assert_eq!(inspect_audio_folder(empty_dir), SdCardStatus::Empty);
+        let _ = fs::remove_dir_all(empty_dir);
+    }
+
+    #[test]
+    fn inspect_folder_with_files_returns_sorted_files() {
+        let test_dir = "/tmp/test_sd_audio_files_12345";
+        let _ = fs::create_dir_all(test_dir);
+        fs::write(format!("{test_dir}/rec002.opus"), b"sample").unwrap();
+        fs::write(format!("{test_dir}/rec001.opus"), b"sample").unwrap();
+        fs::write(format!("{test_dir}/rec003.opus"), b"sample").unwrap();
+
+        let status = inspect_audio_folder(test_dir);
+        match status {
+            SdCardStatus::Files(files) => {
+                assert_eq!(files, vec!["rec001.opus", "rec002.opus", "rec003.opus"]);
+            }
+            other => panic!("expected Files status, got {:?}", other),
+        }
+
+        let _ = fs::remove_dir_all(test_dir);
+    }
+
+    #[test]
+    fn ensure_audio_folder_creates_directory() {
+        let target = "/tmp/test_ensure_sd_audio_dir";
+        let _ = fs::remove_dir_all(target);
+        assert!(!Path::new(target).exists());
+
+        assert!(ensure_audio_folder(target).is_ok());
+        assert!(Path::new(target).is_dir());
+        let _ = fs::remove_dir_all(target);
     }
 }

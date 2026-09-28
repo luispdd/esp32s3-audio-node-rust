@@ -1,20 +1,16 @@
 use std::thread;
 use std::time::Duration;
 
-use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
-    pixelcolor::BinaryColor,
-};
 use esp_idf_svc::hal::gpio::{PinDriver, Pull};
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::units::*;
-use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
 use crate::config::Config;
-use crate::display::{probe_oled_display, render_mode_screen, set_display_power};
+use crate::display::OledDisplay;
 use crate::modes::{DeviceMode, ModeButtonAction, ModeButtonController};
 use crate::network::{wifi_credentials, WifiConnection};
+use crate::sd::{SdCard, SdCardStatus};
 use crate::status::SystemStatus;
 
 pub struct App;
@@ -47,6 +43,7 @@ impl App {
             modem,
             pins,
             i2c0,
+            spi3,
             ..
         } = peripherals;
         let sys_loop = esp_idf_svc::eventloop::EspSystemEventLoop::take()
@@ -66,7 +63,7 @@ impl App {
             error
         })?;
 
-        let mut i2c = I2cDriver::new(
+        let i2c = I2cDriver::new(
             i2c0,
             pins.gpio8,
             pins.gpio9,
@@ -74,37 +71,41 @@ impl App {
         )
         .map_err(|err| format!("failed to configure I2C bus for SSD1306 display: {err}"))?;
 
-        probe_oled_display(&mut i2c)
-            .map_err(|err| format!("OLED hardware validation failed: {err}"))?;
+        let mut display = OledDisplay::init(i2c)?;
 
-        let interface = I2CDisplayInterface::new(i2c);
-        let mut display = Ssd1306::new(interface, DisplaySize128x32, DisplayRotation::Rotate0)
-            .into_buffered_graphics_mode();
-        display
-            .init()
-            .map_err(|err| format!("failed to initialize SSD1306 OLED display: {:?}", err))?;
-        display
-            .set_display_on(true)
-            .map_err(|err| format!("failed to turn on display: {:?}", err))?;
+        #[cfg(target_arch = "xtensa")]
+        let sd_card = SdCard::mount(
+            spi3,
+            pins.gpio12,
+            pins.gpio11,
+            pins.gpio13,
+            pins.gpio10,
+        );
+
+        #[cfg(not(target_arch = "xtensa"))]
+        let sd_card: Result<SdCard, String> = Ok(SdCard);
+
+        let mut sd_status = match &sd_card {
+            Ok(card) => {
+                log::info!("MicroSD card mounted on /sdcard");
+                card.inspect()
+            }
+            Err(err) => {
+                log::warn!("MicroSD card mount skipped or failed: {err}");
+                SdCardStatus::Unavailable(err.clone())
+            }
+        };
 
         let mode_button = PinDriver::input(pins.gpio5, Pull::Up)
             .map_err(|err| format!("failed to configure mode button on GPIO 5: {err}"))?;
 
         let mut current_mode = DeviceMode::Status;
-        let mut display_on = true;
         let mut button_controller =
             ModeButtonController::new(ModeButtonController::DEFAULT_LONG_PRESS_DURATION);
 
-        let text_style = MonoTextStyleBuilder::new()
-            .font(&FONT_6X10)
-            .text_color(BinaryColor::On)
-            .build();
-
-        let mut system_status = SystemStatus::from_runtime(connection.connected);
-        render_mode_screen(&mut display, current_mode, &connection, &system_status, text_style)?;
-        display
-            .flush()
-            .map_err(|err| format!("failed to flush initial OLED screen: {:?}", err))?;
+        let mut system_status =
+            SystemStatus::from_runtime_with_sd(connection.connected, sd_status.clone());
+        display.render(current_mode, &connection, &system_status)?;
 
         log::info!("WiFi credentials loaded from the embedded credential module.");
         log::info!("SSID configured: {}", config.wifi.ssid);
@@ -122,7 +123,7 @@ impl App {
 
         loop {
             let pressed = mode_button.is_low();
-            match button_controller.update(pressed, display_on) {
+            match button_controller.update(pressed, display.is_on()) {
                 ModeButtonAction::CycleMode => {
                     let previous_mode = current_mode;
                     current_mode = current_mode.next();
@@ -134,30 +135,31 @@ impl App {
                 }
                 ModeButtonAction::TurnScreenOff => {
                     log::info!("Button 1 long press: turning OLED display off");
-                    display_on = false;
-                    set_display_power(&mut display, false)?;
+                    display.set_power(false)?;
                 }
                 ModeButtonAction::TurnScreenOn => {
                     log::info!("Button 1 press: turning OLED display on");
-                    display_on = true;
-                    set_display_power(&mut display, true)?;
+                    display.set_power(true)?;
                 }
                 ModeButtonAction::None => {}
             }
 
-            if display_on {
-                system_status = SystemStatus::from_runtime(connection.connected);
-                render_mode_screen(&mut display, current_mode, &connection, &system_status, text_style)?;
-                display
-                    .flush()
-                    .map_err(|err| format!("failed to flush OLED mode update: {:?}", err))?;
+            if display.is_on() {
+                if current_mode == DeviceMode::Sd {
+                    if let Ok(card) = &sd_card {
+                        sd_status = card.inspect();
+                    }
+                }
+                system_status =
+                    SystemStatus::from_runtime_with_sd(connection.connected, sd_status.clone());
+                display.render(current_mode, &connection, &system_status)?;
             }
 
             if !pressed {
                 log::info!(
                     "Mode {} status (display {}): WiFi connected to {} via DHCP {}",
                     current_mode.as_str(),
-                    if display_on { "ON" } else { "OFF" },
+                    if display.is_on() { "ON" } else { "OFF" },
                     connection.ssid,
                     connection.ip
                 );
