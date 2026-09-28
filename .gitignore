@@ -1,0 +1,9 @@
+/.vscode
+/.embuild
+/target
+/Cargo.lock
+/.agents
+/.github
+/.pi
+/secrets.local
+/src/credential.rs

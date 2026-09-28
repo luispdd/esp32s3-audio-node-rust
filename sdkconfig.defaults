@@ -1,0 +1,46 @@
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
+# You might have to increase this further if you allocate large stack variables in the main task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Increase a bit these stack sizes as they are also a bit too small by default
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
+
+# You might have to increase this further if you spawn your own Rust threads 
+# that allocate large stack variables; or better yet - use 
+# `std::thread::Builder::new().stack_size(XXX)` for spawning
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+
+# Octal PSRAM configuration
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MEMTEST=y
+
+# Wi-Fi and networking configuration for browser streaming and device access
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_SCAN_CACHE_SIZE=32
+CONFIG_LWIP_LOCAL_HOSTNAME="esp32s3-audio-node"
+
+# FATFS / SD-card configuration for local Ogg Opus recording
+CONFIG_FATFS_CODEPAGE_437=y
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_PER_FILE_CACHE=y
+
+# Audio path tuning for I2S capture and real-time processing
+CONFIG_I2S_ISR_IRAM_SAFE=y
+
+# 8MB QSPI flash configuration for the ESP32-S3 WROOM board
+# Keep PSRAM in octal mode, but the SPI flash itself is QSPI on this module.
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+
+# Custom partition table: the default app partition is too small for the current firmware image.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="/home/fuchik0ma/code/esp32s3-audio-node/partitions.csv"
