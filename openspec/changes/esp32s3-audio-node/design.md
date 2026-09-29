@@ -92,6 +92,13 @@ The firmware will read credentials from a local, git-ignored file to avoid commi
 
 **Alternative considered:** embedding credentials in source. Rejected because source control safety and operational cleanliness are more important than convenience.
 
+### 8. Use the potentiometer (GPIO 4 / ADC1_CH3) as a real-time software gain control
+The potentiometer wiper is polled periodically on Core 1 alongside the other real-time tasks (I2S capture, button debouncing). Its raw ADC reading is mapped linearly to a floating-point gain multiplier: 0 at the minimum ADC value (wiper fully counter-clockwise → silence) and a configurable maximum at full scale (wiper fully clockwise → loudest). The multiplier is applied inside `convert_i2s_bytes_to_pcm16_with_gain`, which already accepts a gain parameter, so no new audio path is needed. The current gain level derived from the ADC reading is reflected on the STATUS_MODE OLED screen alongside the other sensor readings.
+
+**Alternative considered:** hardware gain via a dedicated amplifier circuit. Rejected because the INMP441 has no programmable hardware gain register, and introducing an external circuit adds complexity without a meaningful quality benefit at the target sample rate and bit depth.
+
+**Alternative considered:** exposing gain as a network-settable parameter rather than a physical control. Rejected because the potentiometer is already wired to GPIO 4 per the hardware baseline and a physical knob gives immediate, tactile feedback without requiring a browser session.
+
 ## Risks / Trade-offs
 
 - [Audio buffer pressure under SD write stalls] → Use PSRAM-backed buffers and a dual-core split so the real-time capture path remains stable while recording or network activity happens.

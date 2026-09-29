@@ -45,6 +45,7 @@ impl App {
             i2c0,
             i2s0,
             spi3,
+            adc1,
             ..
         } = peripherals;
         let sys_loop = esp_idf_svc::eventloop::EspSystemEventLoop::take()
@@ -100,6 +101,25 @@ impl App {
         let audio_buffer = crate::audio::SharedAudioBuffer::new(50);
 
         #[cfg(target_arch = "xtensa")]
+        let mut potentiometer = crate::potentiometer::Potentiometer::new(adc1, pins.gpio4);
+
+        #[cfg(not(target_arch = "xtensa"))]
+        let mut potentiometer = crate::potentiometer::Potentiometer::new();
+
+        let initial_gain = match &mut potentiometer {
+            Ok(p) => p.last_gain(),
+            Err(err) => {
+                log::warn!("Potentiometer initialization failed: {err}");
+                crate::potentiometer::DEFAULT_MAX_GAIN
+            }
+        };
+        let initial_gain_percent = match &mut potentiometer {
+            Ok(p) => p.last_gain_percent(),
+            Err(_) => 100,
+        };
+        audio_buffer.set_gain(initial_gain, initial_gain_percent);
+
+        #[cfg(target_arch = "xtensa")]
         let mut mic = crate::audio::Microphone::new(
             i2s0,
             pins.gpio14,
@@ -142,7 +162,23 @@ impl App {
                     .spawn(move || {
                         log::info!("Audio capture worker thread started on Core 1");
                         loop {
-                            match active_mic.read_frame(320, 50) {
+                            let current_gain = if let Ok(ref mut pot) = potentiometer {
+                                match pot.read_gain() {
+                                    Ok(g) => {
+                                        let pct = pot.last_gain_percent();
+                                        capture_buffer.set_gain(g, pct);
+                                        g
+                                    }
+                                    Err(err) => {
+                                        log::warn!("Potentiometer read error: {err}");
+                                        capture_buffer.current_gain()
+                                    }
+                                }
+                            } else {
+                                capture_buffer.current_gain()
+                            };
+
+                            match active_mic.read_frame_with_gain(320, 50, current_gain) {
                                 Ok(frame) => {
                                     capture_buffer.push_frame(frame);
                                 }
@@ -196,6 +232,7 @@ impl App {
             initial_mic_status,
             initial_pir_status,
             sd_status.clone(),
+            initial_gain_percent,
         );
         display.render(current_mode, &connection, &system_status)?;
 
@@ -215,6 +252,7 @@ impl App {
         log::info!("Record button (Button 2) configured on GPIO 6 with internal pull-up enabled.");
         log::info!("Other button (Button 3) configured on GPIO 7 with internal pull-up enabled.");
         log::info!("PIR sensor input configured on GPIO 3 with pull-down enabled.");
+        log::info!("Potentiometer configured on GPIO 4 (ADC1_CH3) controlling microphone gain in real time.");
 
         loop {
             let pressed = mode_button.is_low();
@@ -253,6 +291,7 @@ impl App {
 
             let pir_detected = pir_sensor.is_high();
             let mic_detected = audio_buffer.is_signal_present();
+            let gain_percent = audio_buffer.current_gain_percent();
 
             if display.is_on() {
                 if current_mode == DeviceMode::Sd {
@@ -265,19 +304,21 @@ impl App {
                     mic_detected,
                     pir_detected,
                     sd_status.clone(),
+                    gain_percent,
                 );
                 display.render(current_mode, &connection, &system_status)?;
             }
 
             if !pressed {
                 log::info!(
-                    "Mode {} status (display {}): WiFi: {}, Mic: {}, PIR: {}, SD: {}",
+                    "Mode {} status (display {}): WiFi: {}, Mic: {}, PIR: {}, SD: {}, Gain: {}%",
                     current_mode.as_str(),
                     if display.is_on() { "ON" } else { "OFF" },
                     if connection.connected { "OK" } else { "KO" },
                     if mic_detected { "OK" } else { "KO" },
                     if pir_detected { "ACTIVE" } else { "IDLE" },
                     if sd_status.is_mounted() { "OK" } else { "KO" },
+                    gain_percent,
                 );
             }
 

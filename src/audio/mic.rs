@@ -18,14 +18,22 @@ pub fn detect_signal(samples: &[u8]) -> bool {
 /// In standard Philips format with stereo slots (8 bytes per sample pair),
 /// the INMP441 (with L/R tied to GND) asserts data on the Left slot.
 pub fn convert_i2s_bytes_to_pcm16(raw: &[u8]) -> Vec<i16> {
-    convert_i2s_bytes_to_pcm16_with_gain(raw, 0)
+    convert_i2s_bytes_to_pcm16_with_gain(raw, 1.0)
 }
 
-/// Converts raw I2S bytes to 16-bit PCM with an optional digital gain shift.
-/// A gain_shift of 0 produces a direct 16-bit MSB alignment (sample >> 16).
-/// Positive gain_shift adds digital gain (e.g., gain_shift = 2 corresponds to >> 14, or +12 dB).
-pub fn convert_i2s_bytes_to_pcm16_with_gain(raw: &[u8], gain_shift: i32) -> Vec<i16> {
-    let shift = (16 - gain_shift).clamp(0, 31) as u32;
+/// Converts raw I2S bytes to 16-bit PCM with a linear gain multiplier.
+/// A gain of 0.0 (or negative/NaN) produces complete silence (all zeros).
+/// A gain of 1.0 produces standard MSB-aligned 16-bit PCM.
+/// Higher values scale the amplitude linearly, clamping to i16 range.
+pub fn convert_i2s_bytes_to_pcm16_with_gain(raw: &[u8], gain: f32) -> Vec<i16> {
+    if gain <= 0.0 || gain.is_nan() {
+        let sample_count = if raw.len() >= 8 && raw.len() % 8 == 0 {
+            raw.len() / 8
+        } else {
+            raw.len() / 4
+        };
+        return vec![0i16; sample_count];
+    }
 
     if raw.len() >= 8 && raw.len() % 8 == 0 {
         // Standard 32-bit slot stereo pair (8 bytes total)
@@ -35,8 +43,9 @@ pub fn convert_i2s_bytes_to_pcm16_with_gain(raw: &[u8], gain_shift: i32) -> Vec<
                 let right = i32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
                 // Pick active channel (INMP441 on Left channel, fallback to Right if needed)
                 let active = if left != 0 { left } else { right };
-                let scaled = active >> shift;
-                scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+                let base_sample = (active >> 16) as f32;
+                let scaled = (base_sample * gain).round();
+                scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
             })
             .collect()
     } else {
@@ -44,8 +53,9 @@ pub fn convert_i2s_bytes_to_pcm16_with_gain(raw: &[u8], gain_shift: i32) -> Vec<
         raw.chunks_exact(4)
             .map(|chunk| {
                 let val = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                let scaled = val >> shift;
-                scaled.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+                let base_sample = (val >> 16) as f32;
+                let scaled = (base_sample * gain).round();
+                scaled.clamp(i16::MIN as f32, i16::MAX as f32) as i16
             })
             .collect()
     }
@@ -55,6 +65,7 @@ pub struct Microphone<'a> {
     #[cfg(target_arch = "xtensa")]
     driver: I2sDriver<'a, I2sRx>,
     last_signal_detected: bool,
+    current_gain: f32,
     #[cfg(not(target_arch = "xtensa"))]
     _phantom: std::marker::PhantomData<&'a ()>,
     #[cfg(not(target_arch = "xtensa"))]
@@ -82,6 +93,7 @@ impl<'a> Microphone<'a> {
         let mut mic = Self {
             driver,
             last_signal_detected: false,
+            current_gain: 1.0,
         };
 
         // Perform initial hardware read to verify communication
@@ -90,25 +102,44 @@ impl<'a> Microphone<'a> {
         Ok(mic)
     }
 
+    pub fn set_gain(&mut self, gain: f32) {
+        self.current_gain = gain;
+    }
+
+    pub fn current_gain(&self) -> f32 {
+        self.current_gain
+    }
+
     pub fn read_samples(&mut self, buffer: &mut [u8], timeout_ticks: u32) -> Result<usize, String> {
         self.driver
             .read(buffer, timeout_ticks)
             .map_err(|err| format!("I2S read failed: {err}"))
     }
 
-    /// Reads a continuous AudioFrame consisting of `samples_count` 16-bit PCM samples.
-    pub fn read_frame(&mut self, samples_count: usize, timeout_ticks: u32) -> Result<AudioFrame, String> {
+    /// Reads a continuous AudioFrame consisting of `samples_count` 16-bit PCM samples with dynamic gain.
+    pub fn read_frame_with_gain(
+        &mut self,
+        samples_count: usize,
+        timeout_ticks: u32,
+        gain: f32,
+    ) -> Result<AudioFrame, String> {
         // In 32-bit stereo mode, each sample needs 8 bytes from I2S
         let raw_len = samples_count * 8;
         let mut raw_buf = vec![0u8; raw_len];
 
         let bytes_read = self.read_samples(&mut raw_buf, timeout_ticks)?;
-        let pcm_samples = convert_i2s_bytes_to_pcm16_with_gain(&raw_buf[..bytes_read], 2);
+        let pcm_samples = convert_i2s_bytes_to_pcm16_with_gain(&raw_buf[..bytes_read], gain);
 
         let signal_present = pcm_samples.iter().any(|&s| s.abs() > 300);
         self.last_signal_detected = signal_present;
+        self.current_gain = gain;
 
         Ok(AudioFrame::new(16_000, 1, pcm_samples))
+    }
+
+    /// Reads a continuous AudioFrame consisting of `samples_count` 16-bit PCM samples using the configured gain.
+    pub fn read_frame(&mut self, samples_count: usize, timeout_ticks: u32) -> Result<AudioFrame, String> {
+        self.read_frame_with_gain(samples_count, timeout_ticks, self.current_gain)
     }
 
     pub fn probe_signal(&mut self) -> bool {
@@ -143,9 +174,18 @@ impl<'a> Microphone<'a> {
     pub fn new() -> Result<Self, String> {
         Ok(Self {
             last_signal_detected: true,
+            current_gain: 1.0,
             _phantom: std::marker::PhantomData,
             mock_frame_index: 0,
         })
+    }
+
+    pub fn set_gain(&mut self, gain: f32) {
+        self.current_gain = gain;
+    }
+
+    pub fn current_gain(&self) -> f32 {
+        self.current_gain
     }
 
     pub fn read_samples(&mut self, buffer: &mut [u8], _timeout_ticks: u32) -> Result<usize, String> {
@@ -153,17 +193,31 @@ impl<'a> Microphone<'a> {
         Ok(buffer.len())
     }
 
-    pub fn read_frame(&mut self, samples_count: usize, _timeout_ticks: u32) -> Result<AudioFrame, String> {
+    pub fn read_frame_with_gain(
+        &mut self,
+        samples_count: usize,
+        _timeout_ticks: u32,
+        gain: f32,
+    ) -> Result<AudioFrame, String> {
         let samples: Vec<i16> = (0..samples_count)
             .map(|i| {
-                let phase = (self.mock_frame_index + i) as f32 / 16_000.0;
-                let tone = (phase * 440.0 * 2.0 * std::f32::consts::PI).sin() * 8000.0;
-                tone as i16
+                if gain <= 0.0 {
+                    0
+                } else {
+                    let phase = (self.mock_frame_index + i) as f32 / 16_000.0;
+                    let tone = (phase * 440.0 * 2.0 * std::f32::consts::PI).sin() * 8000.0 * gain;
+                    tone.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                }
             })
             .collect();
         self.mock_frame_index += samples_count;
-        self.last_signal_detected = true;
+        self.last_signal_detected = gain > 0.0;
+        self.current_gain = gain;
         Ok(AudioFrame::new(16_000, 1, samples))
+    }
+
+    pub fn read_frame(&mut self, samples_count: usize, timeout_ticks: u32) -> Result<AudioFrame, String> {
+        self.read_frame_with_gain(samples_count, timeout_ticks, self.current_gain)
     }
 
     pub fn probe_signal(&mut self) -> bool {
@@ -221,12 +275,20 @@ mod tests {
         let sample: i32 = 100 << 16;
         raw[0..4].copy_from_slice(&sample.to_le_bytes());
 
-        // Gain shift 1 -> 2x amplitude (200)
-        let pcm = convert_i2s_bytes_to_pcm16_with_gain(&raw, 1);
-        assert_eq!(pcm[0], 200);
+        // Gain 0.0 -> complete silence
+        let pcm0 = convert_i2s_bytes_to_pcm16_with_gain(&raw, 0.0);
+        assert_eq!(pcm0[0], 0);
 
-        // Gain shift 2 -> 4x amplitude (400)
-        let pcm4 = convert_i2s_bytes_to_pcm16_with_gain(&raw, 2);
+        // Gain 1.0 -> 1x amplitude (100)
+        let pcm1 = convert_i2s_bytes_to_pcm16_with_gain(&raw, 1.0);
+        assert_eq!(pcm1[0], 100);
+
+        // Gain 2.0 -> 2x amplitude (200)
+        let pcm2 = convert_i2s_bytes_to_pcm16_with_gain(&raw, 2.0);
+        assert_eq!(pcm2[0], 200);
+
+        // Gain 4.0 -> 4x amplitude (400)
+        let pcm4 = convert_i2s_bytes_to_pcm16_with_gain(&raw, 4.0);
         assert_eq!(pcm4[0], 400);
     }
 
@@ -238,5 +300,14 @@ mod tests {
         assert_eq!(frame.sample_rate, 16_000);
         assert_eq!(frame.channels, 1);
         assert!(mic.is_signal_present());
+    }
+
+    #[test]
+    fn microphone_read_frame_with_silence_produces_zeroes() {
+        let mut mic = Microphone::new().unwrap();
+        let frame = mic.read_frame_with_gain(320, 20, 0.0).unwrap();
+        assert_eq!(frame.samples.len(), 320);
+        assert!(frame.samples.iter().all(|&s| s == 0));
+        assert!(!mic.is_signal_present());
     }
 }

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -75,6 +75,8 @@ struct AudioBufferInner {
     state: Mutex<AudioBufferState>,
     available: Condvar,
     listener_count: Arc<AtomicUsize>,
+    gain_bits: AtomicU32,
+    gain_percent: AtomicU32,
 }
 
 struct AudioBufferState {
@@ -97,6 +99,8 @@ impl SharedAudioBuffer {
                 }),
                 available: Condvar::new(),
                 listener_count: Arc::new(AtomicUsize::new(0)),
+                gain_bits: AtomicU32::new(1.0_f32.to_bits()),
+                gain_percent: AtomicU32::new(25),
             }),
         }
     }
@@ -158,6 +162,22 @@ impl SharedAudioBuffer {
         ListenerGuard {
             counter: self.inner.listener_count.clone(),
         }
+    }
+
+    /// Updates the measured gain level from the hardware potentiometer.
+    pub fn set_gain(&self, gain: f32, percent: u8) {
+        self.inner.gain_bits.store(gain.to_bits(), Ordering::Relaxed);
+        self.inner.gain_percent.store(percent as u32, Ordering::Relaxed);
+    }
+
+    /// Returns the current software gain multiplier.
+    pub fn current_gain(&self) -> f32 {
+        f32::from_bits(self.inner.gain_bits.load(Ordering::Relaxed))
+    }
+
+    /// Returns the current software gain level as a percentage (0..=100).
+    pub fn current_gain_percent(&self) -> u8 {
+        self.inner.gain_percent.load(Ordering::Relaxed) as u8
     }
 }
 
@@ -261,9 +281,10 @@ impl LiveAudioStream {
             .fn_handler("/status", Method::Get, move |req| -> Result<(), EspIOError> {
                 let listeners = status_buffer.active_listeners();
                 let signal = status_buffer.is_signal_present();
+                let gain_percent = status_buffer.current_gain_percent();
                 let body = format!(
-                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{}}}"#,
-                    signal, listeners
+                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{}}}"#,
+                    signal, listeners, gain_percent
                 );
                 let headers = [
                     ("Content-Type", "application/json"),
@@ -423,5 +444,13 @@ mod tests {
         assert!(stream.browser_page().contains("/stream.wav"));
         assert!(stream.browser_page().contains("audio"));
         assert!(stream.browser_page().contains("Audio Node"));
+    }
+
+    #[test]
+    fn shared_audio_buffer_gain_tracking() {
+        let buffer = SharedAudioBuffer::new(5);
+        buffer.set_gain(3.5, 88);
+        assert!((buffer.current_gain() - 3.5).abs() < 0.001);
+        assert_eq!(buffer.current_gain_percent(), 88);
     }
 }

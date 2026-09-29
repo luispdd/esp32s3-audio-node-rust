@@ -349,6 +349,19 @@ mod tests {
     }
 
     #[test]
+    fn renders_status_mode_screen_with_potentiometer_gain() {
+        let mut display: MockDisplay<BinaryColor> = MockDisplay::new();
+        display.set_allow_overdraw(true);
+        display.set_allow_out_of_bounds_drawing(true);
+        let wifi = mock_wifi();
+        let status = SystemStatus::from_runtime_with_sensors(true, true, true, SdCardStatus::Empty, 42);
+        let style = default_text_style();
+
+        assert!(render_status_screen(&mut display, &status, style).is_ok());
+        assert!(render_mode_screen(&mut display, DeviceMode::Status, &wifi, &status, style).is_ok());
+    }
+
+    #[test]
     fn renders_live_mode_screen() {
         let mut display: MockDisplay<BinaryColor> = MockDisplay::new();
         display.set_allow_overdraw(true);

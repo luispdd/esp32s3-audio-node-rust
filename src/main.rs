@@ -5,6 +5,7 @@ mod credential;
 pub mod display;
 pub mod modes;
 mod network;
+pub mod potentiometer;
 pub mod sd;
 pub mod status;
 

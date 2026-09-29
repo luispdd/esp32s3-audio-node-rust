@@ -88,6 +88,7 @@ src/
 ├── status.rs       # SystemStatus aggregation for sensors and network state
 ├── sd.rs           # MicroSD card lifecycle, probing, and FATFS file system mounting
 ├── network.rs      # Local Wi-Fi connection and credentials loader
+├── potentiometer.rs# ADC1_CH3 potentiometer driver & linear software gain mapping
 └── audio/
     ├── mod.rs      # Audio module root
     ├── frame.rs    # AudioFrame data structures
@@ -108,18 +109,22 @@ src/
    - Must call `driver.rx_enable()?` on driver initialization.
    - Use `read_samples(&mut buf, timeout_ticks)` for live acquisition and `probe_signal()` / `detect_signal(&buf)` for acoustic activity checks.
 4. **Sensor Status Aggregation (`src/status.rs`):**
-   - Use `SystemStatus::from_runtime_with_sensors(wifi, mic, pir, sd_card)` to feed real live sensor states to STATUS_MODE OLED rendering.
+   - Use `SystemStatus::from_runtime_with_sensors(wifi, mic, pir, sd_card, gain_percent)` to feed real live sensor states and potentiometer gain to STATUS_MODE OLED rendering (`g:<N>%`).
 5. **SD Card Management (`src/sd.rs`):**
    - Do **NOT** call `Peripherals::take()` inside helper functions. Pass acquired pins/peripherals down from `App::run`.
 6. **Live Audio Capture & Ring Buffer (`src/audio/stream.rs` & `src/audio/mic.rs`):**
    - Real-time I2S audio capture runs in a dedicated worker thread pinned to **Core 1** via `ThreadSpawnConfiguration` (`Core::Core1`).
    - Use `SharedAudioBuffer` (PSRAM-backed ring buffer) to decouple real-time capture from Core 0 network/recording tasks. Consumers track progress with monotonic sequence IDs without blocking the capture thread.
-   - `convert_i2s_bytes_to_pcm16_with_gain` converts 32-bit INMP441 samples to 16-bit PCM. Query `audio_buffer.is_signal_present()` for sensor status checks to prevent I2S hardware read contention.
+   - `convert_i2s_bytes_to_pcm16_with_gain(raw, gain: f32)` scales 32-bit INMP441 samples to 16-bit PCM linearly (`gain <= 0.0` outputs all zeros for digital silence).
+   - Use `audio_buffer.set_gain(gain, percent)` / `audio_buffer.current_gain()` / `audio_buffer.current_gain_percent()` for non-blocking lock-free atomic gain sharing between Core 1 and Core 0. Query `audio_buffer.is_signal_present()` for sensor status checks to prevent I2S hardware read contention.
 7. **HTTP Server & Web Assets (`web/index.html` & `src/audio/stream.rs`):**
    - Browser UI templates must live in `web/index.html` (embedded via `include_str!("../../web/index.html")` using `{{ENDPOINT}}` substitution) to keep web assets and Rust code cleanly decoupled.
    - Live audio endpoint `/stream.wav` streams chunked 16-bit PCM prefixed by a 44-byte WAV header (`create_wav_header`) with `0x7fff_ffff` streaming chunk size.
 8. **Wi-Fi Driver Persistence (`src/network.rs`):**
    - `BlockingWifi` / `EspWifi` shuts down the radio on drop. Keep the driver permanently active using `std::mem::forget(wifi)` in `connect_with_modem`.
+9. **Potentiometer & ADC Gain Control (`src/potentiometer.rs`):**
+   - Use `Potentiometer::new(adc1, pins.gpio4)` to initialize the 12-bit oneshot ADC driver on `ADC1` (`ADCCH3<ADCU1>`, attenuation `DB_12`).
+   - Poll `pot.read_gain()` inside the Core 1 audio capture loop (each 20ms frame). Raw ADC values map linearly: deadband (`raw <= 40`) produces `0.0` (silence), full scale (`4095`) produces `4.0x` max gain, and intermediate values scale proportionally.
 
 ---
 

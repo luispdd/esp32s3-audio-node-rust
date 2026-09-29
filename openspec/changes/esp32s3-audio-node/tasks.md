@@ -35,6 +35,7 @@
 - [x] 3.1 Implement the microphone capture path and buffer management for live audio samples and verify audio frames are produced continuously
 - [x] 3.2 Implement the browser-accessible live stream endpoint or minimal serving page and verify a browser can connect to the device over Wi-Fi
 - [x] 3.3 Deliver the live audio payload to the client and verify playback is audible in the browser without external resources
+- [x] 3.4 Wire the potentiometer (GPIO 4 / ADC1_CH3) to the microphone gain stage: continuously poll ADC1_CH3 on Core 1, map the raw ADC reading linearly to a software gain multiplier where the minimum position produces complete silence (multiplier = 0) and the maximum position applies the highest gain (multiplier = max), apply the multiplier inside `convert_i2s_bytes_to_pcm16_with_gain`, and reflect the current gain level on the STATUS_MODE OLED screen
 
 ## 4. Recording to SD Card
 

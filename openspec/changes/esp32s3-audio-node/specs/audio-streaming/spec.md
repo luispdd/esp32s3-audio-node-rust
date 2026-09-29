@@ -61,6 +61,25 @@ The system SHALL provide the minimal browser-facing functionality required to ac
 - **WHEN** the device serves browser content
 - **THEN** the served content SHALL be self-contained and not require non-local external assets or separate services
 
+### Requirement: Potentiometer adjusts microphone gain in real time
+The system SHALL continuously read the potentiometer on GPIO 4 (ADC1_CH3) and apply its value as a linear software gain multiplier to the captured audio samples, ranging from complete silence at the minimum position to maximum gain at the maximum position.
+
+#### Scenario: Potentiometer is at minimum position
+- **WHEN** the potentiometer wiper is at its lowest physical position (ADC reading at or near 0)
+- **THEN** the system SHALL apply a gain multiplier of 0, producing silence in both the live stream and any recording
+
+#### Scenario: Potentiometer is at maximum position
+- **WHEN** the potentiometer wiper is at its highest physical position (ADC reading at or near full scale)
+- **THEN** the system SHALL apply the maximum configured gain multiplier to the audio samples
+
+#### Scenario: Potentiometer is at an intermediate position
+- **WHEN** the potentiometer wiper is at any position between minimum and maximum
+- **THEN** the system SHALL apply a gain multiplier proportional to the ADC reading, producing an audio level between silence and maximum gain
+
+#### Scenario: STATUS_MODE screen reflects current gain
+- **WHEN** the device is in STATUS_MODE and the OLED is on
+- **THEN** the display SHALL show the current gain level derived from the potentiometer reading
+
 ### Requirement: Button 1 controls mode switching and display power
 The system SHALL use Button 1 (GPIO 5) to cycle between device modes on a short press, and to toggle the OLED display power state on a long press.
 

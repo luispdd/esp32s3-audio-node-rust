@@ -7,16 +7,18 @@ pub struct SystemStatus {
     pub pir: bool,
     pub sd: bool,
     pub sd_card: SdCardStatus,
+    pub gain_percent: u8,
 }
 
 impl SystemStatus {
-    pub fn new(wifi: bool, mic: bool, pir: bool, sd_card: SdCardStatus) -> Self {
+    pub fn new(wifi: bool, mic: bool, pir: bool, sd_card: SdCardStatus, gain_percent: u8) -> Self {
         Self {
             wifi,
             mic,
             pir,
             sd: sd_card.is_mounted(),
             sd_card,
+            gain_percent,
         }
     }
 
@@ -34,6 +36,7 @@ impl SystemStatus {
             pir: false,
             sd: is_writable,
             sd_card,
+            gain_percent: 100,
         }
     }
 
@@ -42,6 +45,7 @@ impl SystemStatus {
         mic_detected: bool,
         pir_detected: bool,
         sd_card: SdCardStatus,
+        gain_percent: u8,
     ) -> Self {
         Self {
             wifi: wifi_connected,
@@ -49,17 +53,23 @@ impl SystemStatus {
             pir: pir_detected,
             sd: sd_card.is_mounted(),
             sd_card,
+            gain_percent,
         }
     }
 
     pub fn from_runtime_with_sd(wifi_connected: bool, sd_card: SdCardStatus) -> Self {
-        Self::from_runtime_with_sensors(wifi_connected, true, false, sd_card)
+        Self::from_runtime_with_sensors(wifi_connected, true, false, sd_card, 100)
     }
 
     pub fn summary_lines(&self) -> Vec<String> {
         vec![
             format!("wifi {} mic {}", status_marker(self.wifi), status_marker(self.mic)),
-            format!("pir {} sd {}", status_marker(self.pir), status_marker(self.sd)),
+            format!(
+                "pir {} sd {} g:{}%",
+                status_marker(self.pir),
+                status_marker(self.sd),
+                self.gain_percent
+            ),
         ]
     }
 }
@@ -85,6 +95,7 @@ mod tests {
             pir: false,
             sd: true,
             sd_card: SdCardStatus::Empty,
+            gain_percent: 75,
         };
 
         let summary = status.summary_lines();
@@ -93,6 +104,7 @@ mod tests {
         assert!(summary[0].contains("mic OK"));
         assert!(summary[1].contains("pir KO"));
         assert!(summary[1].contains("sd OK"));
+        assert!(summary[1].contains("g:75%"));
     }
 
     #[test]
@@ -102,17 +114,20 @@ mod tests {
             false,
             true,
             SdCardStatus::Empty,
+            50,
         );
         assert!(status.wifi);
         assert!(!status.mic);
         assert!(status.pir);
         assert!(status.sd);
+        assert_eq!(status.gain_percent, 50);
 
         let summary = status.summary_lines();
         assert!(summary[0].contains("wifi OK"));
         assert!(summary[0].contains("mic KO"));
         assert!(summary[1].contains("pir OK"));
         assert!(summary[1].contains("sd OK"));
+        assert!(summary[1].contains("g:50%"));
     }
 
     #[test]
