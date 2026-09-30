@@ -5,6 +5,7 @@ pub enum DeviceMode {
     Status,
     Live,
     Sd,
+    Pir,
 }
 
 impl DeviceMode {
@@ -12,15 +13,17 @@ impl DeviceMode {
         match self {
             Self::Status => Self::Live,
             Self::Live => Self::Sd,
-            Self::Sd => Self::Status,
+            Self::Sd => Self::Pir,
+            Self::Pir => Self::Status,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Status => Self::Sd,
+            Self::Status => Self::Pir,
             Self::Live => Self::Status,
             Self::Sd => Self::Live,
+            Self::Pir => Self::Sd,
         }
     }
 
@@ -29,6 +32,7 @@ impl DeviceMode {
             Self::Status => "STATUS_MODE",
             Self::Live => "LIVE_MODE",
             Self::Sd => "SD_MODE",
+            Self::Pir => "PIR_MODE",
         }
     }
 }
@@ -327,13 +331,205 @@ impl SdButtonController {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PirButtonAction {
+    None,
+    StartArming,
+    Disarm,
+    StopRecording,
+    CancelRecording,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PirMotionAction {
+    None,
+    StartRecording,
+    StopRecordingTimeout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PirOperationalState {
+    Idle,
+    Arming(Instant),
+    Armed,
+}
+
+#[derive(Debug)]
+pub struct PirButtonController {
+    arming_duration: Duration,
+    recording_duration: Duration,
+    state: PirOperationalState,
+    last_motion_at: Option<Instant>,
+    b2_was_down: bool,
+    b3_was_down: bool,
+}
+
+impl PirButtonController {
+    pub const DEFAULT_ARMING_DURATION: Duration = Duration::from_secs(10);
+    pub const DEFAULT_RECORDING_DURATION: Duration = Duration::from_secs(20);
+
+    pub fn new(arming_duration: Duration) -> Self {
+        Self::with_durations(arming_duration, Self::DEFAULT_RECORDING_DURATION)
+    }
+
+    pub fn with_durations(arming_duration: Duration, recording_duration: Duration) -> Self {
+        Self {
+            arming_duration,
+            recording_duration,
+            state: PirOperationalState::Idle,
+            last_motion_at: None,
+            b2_was_down: false,
+            b3_was_down: false,
+        }
+    }
+
+    pub fn state(&self) -> PirOperationalState {
+        self.state
+    }
+
+    pub fn is_idle(&self) -> bool {
+        matches!(self.state, PirOperationalState::Idle)
+    }
+
+    pub fn is_arming(&self) -> bool {
+        matches!(self.state, PirOperationalState::Arming(_))
+    }
+
+    pub fn is_armed(&self) -> bool {
+        matches!(self.state, PirOperationalState::Armed)
+    }
+
+    pub fn arming_countdown_secs(&self, now: Instant) -> Option<u8> {
+        if let PirOperationalState::Arming(started_at) = self.state {
+            let elapsed = now.saturating_duration_since(started_at);
+            if elapsed < self.arming_duration {
+                let rem = (self.arming_duration - elapsed).as_secs() + 1;
+                Some(rem as u8)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn remaining_recording_secs(&self, now: Instant) -> Option<u8> {
+        if let Some(last_motion) = self.last_motion_at {
+            let elapsed = now.saturating_duration_since(last_motion);
+            if elapsed < self.recording_duration {
+                let rem = (self.recording_duration - elapsed).as_secs() + 1;
+                Some((rem as u8).min(self.recording_duration.as_secs() as u8))
+            } else {
+                Some(0)
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn disarm(&mut self) {
+        self.state = PirOperationalState::Idle;
+        self.last_motion_at = None;
+    }
+
+    pub fn handle_motion(
+        &mut self,
+        motion_detected: bool,
+        is_recording: bool,
+        now: Instant,
+    ) -> PirMotionAction {
+        if !self.is_armed() {
+            self.last_motion_at = None;
+            return PirMotionAction::None;
+        }
+
+        if !is_recording {
+            if motion_detected {
+                self.last_motion_at = Some(now);
+                PirMotionAction::StartRecording
+            } else {
+                PirMotionAction::None
+            }
+        } else {
+            if motion_detected {
+                self.last_motion_at = Some(now);
+                PirMotionAction::None
+            } else if let Some(last_motion) = self.last_motion_at {
+                if now.saturating_duration_since(last_motion) >= self.recording_duration {
+                    self.last_motion_at = None;
+                    PirMotionAction::StopRecordingTimeout
+                } else {
+                    PirMotionAction::None
+                }
+            } else {
+                self.last_motion_at = Some(now);
+                PirMotionAction::None
+            }
+        }
+    }
+
+    pub fn update(&mut self, b2_down: bool, b3_down: bool, is_recording: bool) -> PirButtonAction {
+        self.update_with_time(b2_down, b3_down, is_recording, Instant::now())
+    }
+
+    pub fn update_with_time(
+        &mut self,
+        b2_down: bool,
+        b3_down: bool,
+        is_recording: bool,
+        now: Instant,
+    ) -> PirButtonAction {
+        // Advance arming state if arming duration has elapsed
+        if let PirOperationalState::Arming(started_at) = self.state {
+            if now.saturating_duration_since(started_at) >= self.arming_duration {
+                self.state = PirOperationalState::Armed;
+            }
+        }
+
+        let b2_edge = b2_down && !self.b2_was_down;
+        let b3_edge = b3_down && !self.b3_was_down;
+        self.b2_was_down = b2_down;
+        self.b3_was_down = b3_down;
+
+        if is_recording {
+            if b2_edge {
+                self.state = PirOperationalState::Idle;
+                self.last_motion_at = None;
+                return PirButtonAction::StopRecording;
+            }
+            if b3_edge {
+                self.last_motion_at = None;
+                return PirButtonAction::CancelRecording;
+            }
+            return PirButtonAction::None;
+        }
+
+        if b2_edge {
+            match self.state {
+                PirOperationalState::Idle => {
+                    self.state = PirOperationalState::Arming(now);
+                    self.last_motion_at = None;
+                    PirButtonAction::StartArming
+                }
+                PirOperationalState::Arming(_) | PirOperationalState::Armed => {
+                    self.state = PirOperationalState::Idle;
+                    self.last_motion_at = None;
+                    PirButtonAction::Disarm
+                }
+            }
+        } else {
+            PirButtonAction::None
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(unused_imports)]
 mod tests {
     use super::*;
 
     #[test]
-    fn mode_button_cycles_through_status_live_and_sd() {
+    fn mode_button_cycles_through_all_modes() {
         let mut mode = DeviceMode::Status;
 
         mode = mode.next();
@@ -343,6 +539,21 @@ mod tests {
         assert_eq!(mode, DeviceMode::Sd);
 
         mode = mode.next();
+        assert_eq!(mode, DeviceMode::Pir);
+
+        mode = mode.next();
+        assert_eq!(mode, DeviceMode::Status);
+
+        mode = mode.prev();
+        assert_eq!(mode, DeviceMode::Pir);
+
+        mode = mode.prev();
+        assert_eq!(mode, DeviceMode::Sd);
+
+        mode = mode.prev();
+        assert_eq!(mode, DeviceMode::Live);
+
+        mode = mode.prev();
         assert_eq!(mode, DeviceMode::Status);
     }
 
@@ -550,5 +761,165 @@ mod tests {
         // B3 is released -> MUST NOT trigger NextFile!
         let t2 = t0 + Duration::from_millis(200);
         assert_eq!(ctrl.update_with_time(false, false, false, false, t2), SdButtonAction::None);
+    }
+
+    #[test]
+    fn pir_button_arming_flow_and_completion() {
+        let mut ctrl = PirButtonController::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+
+        assert!(ctrl.is_idle());
+        assert_eq!(ctrl.arming_countdown_secs(t0), None);
+
+        // Tap B2 -> starts arming
+        assert_eq!(ctrl.update_with_time(true, false, false, t0), PirButtonAction::StartArming);
+        assert!(ctrl.is_arming());
+        assert_eq!(ctrl.arming_countdown_secs(t0), Some(10));
+
+        // Release B2
+        assert_eq!(ctrl.update_with_time(false, false, false, t0 + Duration::from_millis(150)), PirButtonAction::None);
+        assert!(ctrl.is_arming());
+
+        // Check countdown at 4 seconds elapsed -> 7s remaining
+        let t4 = t0 + Duration::from_secs(4);
+        assert_eq!(ctrl.update_with_time(false, false, false, t4), PirButtonAction::None);
+        assert!(ctrl.is_arming());
+        assert_eq!(ctrl.arming_countdown_secs(t4), Some(7));
+
+        // Check countdown at 9.5s -> 1s remaining
+        let t9_5 = t0 + Duration::from_millis(9500);
+        assert_eq!(ctrl.arming_countdown_secs(t9_5), Some(1));
+
+        // At 10 seconds -> becomes Armed!
+        let t10 = t0 + Duration::from_secs(10);
+        assert_eq!(ctrl.update_with_time(false, false, false, t10), PirButtonAction::None);
+        assert!(ctrl.is_armed());
+        assert_eq!(ctrl.arming_countdown_secs(t10), None);
+    }
+
+    #[test]
+    fn pir_button_disarms_during_arming_and_when_armed() {
+        let mut ctrl = PirButtonController::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+
+        // 1. Arm and cancel during arming
+        assert_eq!(ctrl.update_with_time(true, false, false, t0), PirButtonAction::StartArming);
+        assert!(ctrl.is_arming());
+        assert_eq!(ctrl.update_with_time(false, false, false, t0 + Duration::from_millis(100)), PirButtonAction::None);
+
+        // Press B2 again at 3s -> Disarms
+        assert_eq!(ctrl.update_with_time(true, false, false, t0 + Duration::from_secs(3)), PirButtonAction::Disarm);
+        assert!(ctrl.is_idle());
+
+        // 2. Arm to completion, then disarm
+        let t1 = t0 + Duration::from_secs(5);
+        assert_eq!(ctrl.update_with_time(true, false, false, t1), PirButtonAction::StartArming);
+        assert_eq!(ctrl.update_with_time(false, false, false, t1 + Duration::from_secs(10)), PirButtonAction::None);
+        assert!(ctrl.is_armed());
+
+        // Press B2 while armed -> Disarms
+        assert_eq!(ctrl.update_with_time(true, false, false, t1 + Duration::from_secs(12)), PirButtonAction::Disarm);
+        assert!(ctrl.is_idle());
+    }
+
+    #[test]
+    fn pir_button_recording_stop_and_cancel() {
+        let mut ctrl = PirButtonController::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+
+        // Start arming and advance to armed
+        ctrl.update_with_time(true, false, false, t0);
+        ctrl.update_with_time(false, false, false, t0 + Duration::from_secs(10));
+        assert!(ctrl.is_armed());
+
+        // While recording, B2 stops recording and disarms
+        let t1 = t0 + Duration::from_secs(12);
+        assert_eq!(ctrl.update_with_time(true, false, true, t1), PirButtonAction::StopRecording);
+        assert!(ctrl.is_idle());
+
+        // Manual re-arm and test B3 cancel
+        ctrl.update_with_time(true, false, false, t1 + Duration::from_secs(1));
+        ctrl.update_with_time(false, false, false, t1 + Duration::from_secs(11));
+        assert!(ctrl.is_armed());
+
+        // While recording, B3 cancels recording
+        let t2 = t1 + Duration::from_secs(13);
+        assert_eq!(ctrl.update_with_time(false, true, true, t2), PirButtonAction::CancelRecording);
+    }
+
+    #[test]
+    fn pir_motion_trigger_and_duration_extension() {
+        let mut ctrl = PirButtonController::with_durations(Duration::from_secs(10), Duration::from_secs(20));
+        let t0 = Instant::now();
+
+        // 1. Motion ignored when idle
+        assert_eq!(ctrl.handle_motion(true, false, t0), PirMotionAction::None);
+
+        // 2. Motion ignored when arming
+        ctrl.update_with_time(true, false, false, t0);
+        assert!(ctrl.is_arming());
+        assert_eq!(ctrl.handle_motion(true, false, t0 + Duration::from_secs(3)), PirMotionAction::None);
+
+        // 3. Advance to armed
+        ctrl.update_with_time(false, false, false, t0 + Duration::from_secs(10));
+        assert!(ctrl.is_armed());
+
+        // 4. Motion detected while armed -> StartRecording!
+        let t_motion = t0 + Duration::from_secs(11);
+        assert_eq!(ctrl.handle_motion(true, false, t_motion), PirMotionAction::StartRecording);
+        assert_eq!(ctrl.remaining_recording_secs(t_motion), Some(20));
+
+        // 5. While recording, new motion at +15s resets the 20s counter
+        let t_motion2 = t_motion + Duration::from_secs(15);
+        assert_eq!(ctrl.handle_motion(true, true, t_motion2), PirMotionAction::None);
+        assert_eq!(ctrl.remaining_recording_secs(t_motion2), Some(20));
+
+        // 6. At +10s after second motion -> 10s remaining
+        let t_check = t_motion2 + Duration::from_secs(10);
+        assert_eq!(ctrl.handle_motion(false, true, t_check), PirMotionAction::None);
+        assert_eq!(ctrl.remaining_recording_secs(t_check), Some(10));
+
+        // 7. At +20s after second motion -> StopRecordingTimeout!
+        let t_timeout = t_motion2 + Duration::from_secs(20);
+        assert_eq!(ctrl.handle_motion(false, true, t_timeout), PirMotionAction::StopRecordingTimeout);
+        assert!(ctrl.is_armed()); // stays armed and ready for next motion
+
+        // 8. Subsequent motion after finalization cleanly starts a new recording
+        let t_motion3 = t_timeout + Duration::from_secs(5);
+        assert_eq!(ctrl.handle_motion(true, false, t_motion3), PirMotionAction::StartRecording);
+        assert_eq!(ctrl.remaining_recording_secs(t_motion3), Some(20));
+    }
+
+    #[test]
+    fn pir_continuous_motion_repeatedly_resets_20s_timeout() {
+        let mut ctrl = PirButtonController::with_durations(Duration::from_secs(10), Duration::from_secs(20));
+        let t0 = Instant::now();
+
+        // Arm and enter armed state
+        ctrl.update_with_time(true, false, false, t0);
+        ctrl.update_with_time(false, false, false, t0 + Duration::from_secs(10));
+        assert!(ctrl.is_armed());
+
+        // First motion starts recording
+        let t1 = t0 + Duration::from_secs(11);
+        assert_eq!(ctrl.handle_motion(true, false, t1), PirMotionAction::StartRecording);
+
+        // Repeated motion events at +5s intervals extend the deadline each time
+        for step in 1..=10 {
+            let t_step = t1 + Duration::from_secs(step * 5);
+            assert_eq!(ctrl.handle_motion(true, true, t_step), PirMotionAction::None);
+            assert_eq!(ctrl.remaining_recording_secs(t_step), Some(20));
+        }
+
+        // 50 seconds since t1, but last motion was at +50s. At +65s (15s after last motion):
+        let t_check = t1 + Duration::from_secs(65);
+        assert_eq!(ctrl.handle_motion(false, true, t_check), PirMotionAction::None);
+        assert_eq!(ctrl.remaining_recording_secs(t_check), Some(5));
+
+        // At +70s (20s after last motion) -> times out and cleanly stops
+        let t_timeout = t1 + Duration::from_secs(70);
+        assert_eq!(ctrl.handle_motion(false, true, t_timeout), PirMotionAction::StopRecordingTimeout);
+        assert!(ctrl.is_armed());
+        assert_eq!(ctrl.remaining_recording_secs(t_timeout), None);
     }
 }

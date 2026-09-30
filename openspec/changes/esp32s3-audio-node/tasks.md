@@ -55,8 +55,17 @@
 - [x] 5.4 Implement the delete recording functionality in the browser UI.
 - [x] 5.5 On the board, implement controls to navigate among the existing recordings using button 2 (GPIO 7). The list will show the files in reverse chronological order. Button 3 (GPIO 6) will be used to skip to the next recording. To press on button 2 again will initiate the playback of the current recording and will be used to stop it if pressed again. A long press on button 2 + button 3 will delete the currently selected file.
 
-## 6. Hardening and Polish
+## 6. Motion-Triggered Recording (PIR_MODE)
 
-- [ ] 6.1 Tune buffer sizes, latency, and reliability for real-world device operation and verify stable behavior under sustained use
-- [ ] 6.2 Improve status reporting and user feedback on the OLED or browser UI and verify the system remains understandable during operation
-- [ ] 6.3 Review the device behavior against the full-feature scope and identify future improvements for refinement in later iterations
+- [x] 6.1 Add `PIR_MODE` to `DeviceMode` enum, update Button 1 mode cycling sequence (`STATUS_MODE` -> `LIVE_MODE` -> `SD_MODE` -> `PIR_MODE`), and implement the initial OLED display layout for `PIR_MODE` showing mode title, arming countdown / active monitoring status, motion detection state, and recording duration timer
+- [x] 6.2 Implement Button 2 arming and lifecycle state machine in `PIR_MODE`: pressing Button 2 initiates a 10-second arming countdown before activating motion monitoring; pressing Button 2 again disarms monitoring (or stops active recording); short-pressing Button 1 changes mode and disarms; long-pressing Button 1 toggles display power while keeping monitoring active
+- [x] 6.3 Implement motion detection trigger and immediate recording: when the 10-second arming delay has elapsed and the detector is actively monitoring, immediately trigger audio recording to `/audio/YYYYMMDD_HHMMSS.wav` on the SD card whenever the PIR sensor (GPIO 3) detects movement
+- [x] 6.4 Implement dynamic recording duration extension: maintain recording for 20 seconds from the latest motion event, resetting the 20-second countdown each time new movement is detected by the PIR sensor, and cleanly finalize the WAV file and return to the active monitoring state once 20 seconds have elapsed without motion
+- [ ] 6.5 (Optional) Implement microphone acoustic pattern extension: monitor microphone audio level during PIR recording to extend/reset the 20-second recording timer if sound activity exceeding the ambient baseline pattern is detected
+- [ ] 6.6 Update system status reporting and web status / API endpoints to reflect `PIR_MODE` state, arming countdown, active monitoring, and motion recording activity
+
+## 7. Hardening and Polish
+
+- [ ] 7.1 Tune buffer sizes, latency, and reliability for real-world device operation and verify stable behavior under sustained use
+- [ ] 7.2 Improve status reporting and user feedback on the OLED or browser UI and verify the system remains understandable during operation
+- [ ] 7.3 Review the device behavior against the full-feature scope and identify future improvements for refinement in later iterations

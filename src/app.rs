@@ -8,7 +8,10 @@ use esp_idf_svc::hal::units::*;
 
 use crate::config::Config;
 use crate::display::OledDisplay;
-use crate::modes::{DeviceMode, ModeButtonAction, ModeButtonController, SdButtonAction, SdButtonController};
+use crate::modes::{
+    DeviceMode, ModeButtonAction, ModeButtonController, PirButtonAction, PirButtonController,
+    PirMotionAction, SdButtonAction, SdButtonController,
+};
 use crate::network::{wifi_credentials, WifiConnection};
 use crate::sd::{SdCard, SdCardStatus};
 use crate::status::SystemStatus;
@@ -268,6 +271,10 @@ impl App {
             SdButtonController::DEFAULT_LONG_PRESS_DURATION,
             SdButtonController::DEFAULT_CHORD_DURATION,
         );
+        let mut pir_button_controller = PirButtonController::new(
+            PirButtonController::DEFAULT_ARMING_DURATION,
+        );
+        let mut pir_was_armed = false;
         let mut selected_file_index: usize = 0;
 
         let mut button2_was_pressed = false;
@@ -289,10 +296,11 @@ impl App {
         log::info!("Initial device mode: {}", current_mode.as_str());
         log::info!("Display status: {}", connection.screen_status());
         log::info!(
-            "Mode button state machine: {} -> {} -> {} (short press cycles mode, long press toggles display power)",
+            "Mode button state machine: {} -> {} -> {} -> {} (short press cycles mode, long press toggles display power)",
             DeviceMode::Status.as_str(),
             DeviceMode::Live.as_str(),
-            DeviceMode::Sd.as_str()
+            DeviceMode::Sd.as_str(),
+            DeviceMode::Pir.as_str()
         );
         log::info!("Mode button is active-low and configured on GPIO 5 with internal pull-up enabled.");
         log::info!("Record button (Button 2) configured on GPIO 7 with internal pull-up enabled.");
@@ -324,6 +332,16 @@ impl App {
                 ModeButtonAction::CycleMode => {
                     let previous_mode = current_mode;
                     current_mode = current_mode.next();
+                    if previous_mode == DeviceMode::Pir {
+                        pir_button_controller.disarm();
+                        pir_was_armed = false;
+                        if recording_controller.is_recording() {
+                            match recording_controller.stop() {
+                                Ok(filename) => log::info!("PIR recording stopped on mode switch: {filename}"),
+                                Err(err) => log::warn!("Failed to stop PIR recording on mode switch: {err}"),
+                            }
+                        }
+                    }
                     if current_mode == DeviceMode::Sd {
                         selected_file_index = 0;
                     }
@@ -346,6 +364,9 @@ impl App {
 
             let b2_down = record_button.is_low();
             let b3_down = other_button.is_low();
+            let pir_detected = pir_sensor.is_high();
+            let mic_detected = audio_buffer.is_signal_present();
+            let gain_percent = audio_buffer.current_gain_percent();
 
             if current_mode == DeviceMode::Sd {
                 let is_rec = recording_controller.is_recording();
@@ -491,6 +512,82 @@ impl App {
                     }
                     SdButtonAction::None => {}
                 }
+            } else if current_mode == DeviceMode::Pir {
+                let is_rec = recording_controller.is_recording();
+                match pir_button_controller.update(b2_down, b3_down, is_rec) {
+                    PirButtonAction::StartArming => {
+                        log::info!("PIR_MODE: Button 2 pressed - starting 10-second arming countdown");
+                    }
+                    PirButtonAction::Disarm => {
+                        log::info!("PIR_MODE: Button 2 pressed - disarmed motion monitoring");
+                    }
+                    PirButtonAction::StopRecording => {
+                        match recording_controller.stop() {
+                            Ok(filename) => {
+                                log::info!("PIR_MODE: Recording stopped and saved: {filename}");
+                                if let Ok(card) = &sd_card {
+                                    sd_status = card.inspect();
+                                }
+                            }
+                            Err(err) => log::warn!("Failed to stop PIR recording: {err}"),
+                        }
+                    }
+                    PirButtonAction::CancelRecording => {
+                        match recording_controller.cancel() {
+                            Ok(()) => {
+                                log::info!("PIR_MODE: Recording cancelled and discarded");
+                                if let Ok(card) = &sd_card {
+                                    sd_status = card.inspect();
+                                }
+                            }
+                            Err(err) => log::warn!("Failed to cancel PIR recording: {err}"),
+                        }
+                    }
+                    PirButtonAction::None => {}
+                }
+
+                if pir_button_controller.is_armed() && !pir_was_armed {
+                    log::info!("PIR_MODE: Arming complete. Motion monitoring is now ACTIVE.");
+                }
+                pir_was_armed = pir_button_controller.is_armed();
+
+                let is_rec_now = recording_controller.is_recording();
+                let motion_action = pir_button_controller.handle_motion(pir_detected, is_rec_now, std::time::Instant::now());
+                match motion_action {
+                    PirMotionAction::StartRecording => {
+                        if playback_controller.is_playing() {
+                            let _ = playback_controller.stop();
+                        }
+                        let audio_dir = crate::sd::get_audio_dir();
+                        match recording_controller.start(audio_dir, audio_buffer.clone()) {
+                            Ok(info) => {
+                                log::info!(
+                                    "PIR_MODE: Motion detected on GPIO 3 - started recording {}",
+                                    info.filename
+                                );
+                            }
+                            Err(err) => {
+                                log::warn!("PIR_MODE: Failed to start recording on motion: {err}");
+                            }
+                        }
+                    }
+                    PirMotionAction::StopRecordingTimeout => {
+                        match recording_controller.stop() {
+                            Ok(filename) => {
+                                log::info!(
+                                    "PIR_MODE: 20 seconds elapsed without motion - finalized recording: {filename}"
+                                );
+                                if let Ok(card) = &sd_card {
+                                    sd_status = card.inspect();
+                                }
+                            }
+                            Err(err) => {
+                                log::warn!("PIR_MODE: Failed to finalize recording on motion timeout: {err}");
+                            }
+                        }
+                    }
+                    PirMotionAction::None => {}
+                }
             } else {
                 if b2_down && !button2_was_pressed {
                     log::info!("Button 2 (GPIO 7) pressed (mode {})", current_mode.as_str());
@@ -502,10 +599,6 @@ impl App {
             button2_was_pressed = b2_down;
             button3_was_pressed = b3_down;
 
-            let pir_detected = pir_sensor.is_high();
-            let mic_detected = audio_buffer.is_signal_present();
-            let gain_percent = audio_buffer.current_gain_percent();
-
             if display.is_on() {
                 if current_mode == DeviceMode::Sd {
                     if let Ok(card) = &sd_card {
@@ -514,6 +607,11 @@ impl App {
                 }
                 let active_rec = recording_controller.current_recording();
                 let active_pb = playback_controller.current_playback();
+                let pir_status = crate::status::PirModeStatus {
+                    armed: pir_button_controller.is_armed(),
+                    arming_countdown: pir_button_controller.arming_countdown_secs(std::time::Instant::now()),
+                    recording_remaining_secs: pir_button_controller.remaining_recording_secs(std::time::Instant::now()),
+                };
                 system_status = SystemStatus::from_runtime_with_sensors(
                     connection.connected,
                     mic_detected,
@@ -523,7 +621,8 @@ impl App {
                 )
                 .with_recording(active_rec)
                 .with_playback(active_pb)
-                .with_selected_file_index(selected_file_index);
+                .with_selected_file_index(selected_file_index)
+                .with_pir_mode(pir_status);
                 display.render(current_mode, &connection, &system_status)?;
             }
 

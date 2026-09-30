@@ -24,6 +24,7 @@ The original architecture also defines the workload split:
 - Record microphone audio locally in standard WAV format under `/audio/YYYYMMDD_HHMMSS.wav` on the SD card with robust start, stop, and cancel controls.
 - Provide on-device file navigation, playback, and safe two-button deletion in `SD_MODE`.
 - Expose stored recordings through a browser-accessible listing, native browser playback, and remote deletion path.
+- Support motion-triggered automatic recording to SD card in `PIR_MODE` using the PIR sensor (GPIO 3), armed via Button 2 with a 10-second arming delay before motion monitoring starts, and dynamic 20-second motion-persistence extension.
 - Keep the device self-contained and usable from a browser without external infrastructure.
 - Preserve the original hardware and dual-core constraints defined in the initial project specification.
 
@@ -49,7 +50,7 @@ This keeps the product complete in scope while reducing risk and validating the 
 
 ### 6. Introduce a device mode system before the audio pipeline
 Before the audio pipeline is wired up, the firmware goes through a dedicated system bootstrap phase that establishes the interactive skeleton of the device:
-- Three device modes are defined: STATUS_MODE, LIVE_MODE, and SD_MODE. Button 1 (GPIO 5) cycles through them on a short press. A long press on Button 1 turns the OLED screen off; subsequent presses turn the screen back on and restore the active mode view.
+- Four device modes are defined: STATUS_MODE, LIVE_MODE, SD_MODE, and PIR_MODE. Button 1 (GPIO 5) cycles through them on a short press. A long press on Button 1 turns the OLED screen off; subsequent presses turn the screen back on and restore the active mode view.
 - Each mode drives a distinct OLED display layout. LIVE_MODE shows the title and the DHCP IP. SD_MODE verifies the SD card and eventually shows the audio file list. STATUS_MODE shows live sensor readings: Wi-Fi, microphone signal, PIR activity, and SD availability.
 - Screen management is extracted into a dedicated `src/display.rs` module with an extensible, mode-driven API so that future mode additions and richer content do not require changes to the core application loop.
 - SD card probing and lifecycle management are extracted into a dedicated `src/sd.rs` module. This fixes a startup-ordering bug where the probe function attempted to re-acquire the hardware peripherals after the main application had already taken them.
@@ -169,7 +170,27 @@ Users need to inspect, play back, and manage recorded files both on the physical
 
 **Alternative considered:** single-button long press for on-device deletion. Rejected because holding a single navigation button can easily be triggered accidentally; requiring both Button 2 and Button 3 to be held simultaneously provides an intentional, safe confirmation chord.
 
+### 14. Motion-Triggered Recording in PIR_MODE
+To enable automated surveillance/monitoring use cases without continuous manual intervention:
+- **Device Mode Integration:** `PIR_MODE` is added to `DeviceMode` and incorporated into Button 1's cyclic navigation sequence (`STATUS_MODE` -> `LIVE_MODE` -> `SD_MODE` -> `PIR_MODE`).
+- **Arming Delay (10 seconds):** In `PIR_MODE`, pressing Button 2 (GPIO 7) initiates a 10-second arming countdown before motion monitoring activates. During these 10 seconds, the OLED displays the countdown (e.g. `ARMING: 10s...`) and PIR sensor readings are ignored, providing a grace period for the user to leave the monitored area without triggering false detection.
+- **Active Monitoring & Immediate Recording:** Once the 10-second arming countdown completes, the system enters the active monitoring state (`ARMED`). Whenever the PIR sensor (GPIO 3) detects movement (digital high), audio recording to `/audio/YYYYMMDD_HHMMSS.wav` on the SD card starts immediately.
+- **Dynamic Extension (20 seconds):**
+  - The recording is configured to last for 20 seconds following the most recently detected motion.
+  - Every time new motion is detected by the PIR sensor while recording is active, the 20-second stop timer is reset back to 20 seconds.
+  - When 20 seconds elapse without any further motion detected, the recording worker cleanly finalizes the WAV header, flushes data to the SD card, and returns to the active monitoring state.
+- **Disarming and Button Controls:**
+  - Motion monitoring remains active until Button 2 is pressed again (disarming back to `IDLE`) or Button 1 is short-pressed to cycle to another device mode.
+  - If Button 2 is pressed during an active recording, recording stops and finalizes immediately, and monitoring is disarmed.
+  - If Button 3 (GPIO 6) is pressed during active recording, the recording is cancelled and discarded.
+  - A long press on Button 1 (>= 800ms) toggles the OLED screen off to conserve power, while background motion monitoring and recording tasks continue running unaffected. A subsequent short press on Button 1 turns the screen back on and restores the active view.
+- **Optional Acoustic Pattern Extension:** As an optional enhancement, the Core 1 audio analysis can monitor mic input amplitude/pattern during active recording; if anomalous acoustic energy above ambient noise is sustained, the 20-second timer can also be reset to avoid cutting off ongoing events during momentary visual occlusion or stationary subjects.
+
+**Alternative considered:** immediate monitoring without a 10-second arming delay. Rejected because the user would immediately trigger motion detection while setting down the board or stepping away.
+
 ## Risks / Trade-offs
+
+- [PIR sensor noise and false triggers] → Require an armed state via Button 2 with a 10-second arming delay, and debounce PIR readings so transient noise spikes do not trigger spurious recording writes.
 
 - [Audio buffer pressure under SD write stalls] → Use PSRAM-backed buffers and a dual-core split so the real-time capture path remains stable while recording or network activity happens.
 - [Browser compatibility across stream formats] → Prefer a simple browser-compatible endpoint and keep the stream payload standardized, with minimal fallback logic where needed.

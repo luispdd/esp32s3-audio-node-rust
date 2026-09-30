@@ -12,7 +12,7 @@ This proposal follows the hardware baseline defined in the project’s initial s
 - Keep the final product scope full-featured while delivering it in a practical sequence: live stream first, then SD-card recording, then playback from stored files.
 - Store Wi-Fi credentials in a local, git-ignored config file so source code remains portable and safe.
 - Preserve the hardware contract defined in the original design: INMP441 on GPIO 14/15/16, SD SPI on GPIO 12/11/13/10, OLED I2C on GPIO 8/9, PIR on GPIO 3, ADC gain control on GPIO 4, and buttons on GPIO 5/6/7 while avoiding GPIO 33-37.
-- Implement a device mode system (STATUS_MODE, LIVE_MODE, SD_MODE) driven by Button 1 (GPIO 5), with a dedicated OLED display layout per mode, short-press mode rotation, and long-press display power toggling (off/on).
+- Implement a device mode system (STATUS_MODE, LIVE_MODE, SD_MODE, PIR_MODE) driven by Button 1 (GPIO 5), with a dedicated OLED display layout per mode, short-press mode rotation, and long-press display power toggling (off/on).
 - Extract screen management into `src/display.rs` and SD card management into `src/sd.rs` to maintain a clean, extensible module boundary as the codebase grows.
 - Add web-based gain override controls to the browser live stream player (a checkbox to enable override and a slider to set 0–100% gain) so listeners can adjust audio level remotely without touching the physical board, persisting in memory until unchecked or board restart.
 - Control the onboard WS2812 RGB LED on GPIO 38: illuminate blue during hardware and network initialization, then turn off completely once the boot process finishes.
@@ -21,12 +21,14 @@ This proposal follows the hardware baseline defined in the project’s initial s
 - Implement hardware recording controls in `SD_MODE`: Button 2 (GPIO 7) starts recording and stops/finalizes when pressed again; Button 3 (GPIO 6) cancels recording in progress and discards the file.
 - Implement onboard recording browsing and playback in `SD_MODE`: Button 2 (GPIO 7) navigates existing files in reverse chronological order, Button 3 (GPIO 6) skips to the next recording, pressing Button 2 starts or stops playback of the selected file, and a simultaneous long press on Button 2 + Button 3 deletes the selected file.
 - Provide web interface management for stored recordings: list recordings, play them back natively in the browser without external services, start/stop recording remotely, and delete recordings from the web UI.
+- Implement motion-triggered audio recording in `PIR_MODE`: pressing Button 2 (GPIO 7) initiates a 10-second arming countdown before activating motion monitoring. Once active, any movement detected by the PIR sensor (GPIO 3) immediately starts recording. Recording continues for 20 seconds following the most recently detected motion, resetting the countdown whenever new motion is detected. Motion monitoring persists until Button 2 is pressed again or Button 1 is short-pressed to cycle mode, while Button 1 long-press toggles the screen off without interrupting monitoring. An optional acoustic extension keeps recording active if sounds deviate from the ambient pattern.
 
 ## Capabilities
 
 ### New Capabilities
 - `audio-streaming`: the ESP32-S3 device captures audio, exposes it to the browser with real-time gain control (physical potentiometer and browser override), syncs system time via NTP, records timestamped WAV files to SD card with physical/web controls, and provides onboard/browser navigation, playback, and file deletion without requiring external services.
-- `device-mode-system`: a button-driven, OLED-displayed mode switching layer (STATUS_MODE, LIVE_MODE, SD_MODE) that provides a verifiable interactive foundation before the full audio pipeline is activated.
+- `device-mode-system`: a button-driven, OLED-displayed mode switching layer (STATUS_MODE, LIVE_MODE, SD_MODE, PIR_MODE) that provides a verifiable interactive foundation before the full audio pipeline is activated.
+- `motion-triggered-recording`: automated audio capture to SD card triggered by PIR motion detection (GPIO 3) with a 10-second pre-monitoring arming delay, a 20-second active recording window reset by subsequent motion events, persistent monitoring compatible with display power saving, and optional sound-anomaly persistence.
 
 ### Modified Capabilities
 - None

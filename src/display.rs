@@ -158,6 +158,7 @@ where
         DeviceMode::Status => render_status_screen(display, status, text_style),
         DeviceMode::Live => render_live_screen(display, connection, text_style),
         DeviceMode::Sd => render_sd_screen(display, status, text_style),
+        DeviceMode::Pir => render_pir_screen(display, status, text_style),
     }
 }
 
@@ -360,6 +361,89 @@ where
     Ok(())
 }
 
+pub fn render_pir_screen<D>(
+    display: &mut D,
+    status: &SystemStatus,
+    text_style: MonoTextStyle<'_, BinaryColor>,
+) -> Result<(), String>
+where
+    D: DrawTarget<Color = BinaryColor>,
+    D::Error: core::fmt::Debug,
+{
+    let (header, line1, line2) = if let Some(ref rec) = status.recording {
+        let mins = rec.duration_secs / 60;
+        let secs = rec.duration_secs % 60;
+        let rem_str = if let Some(rem) = status.pir_mode.recording_remaining_secs {
+            format!("{rem}s rem")
+        } else {
+            format!("{:02}:{:02}", mins, secs)
+        };
+        let motion_tag = if status.pir { "MOT" } else { "---" };
+        (
+            format!("{} [REC]", DeviceMode::Pir.as_str()),
+            format!("{} [{}]", rem_str, motion_tag),
+            truncate_display_line(&rec.filename, 20),
+        )
+    } else if let Some(countdown) = status.pir_mode.arming_countdown {
+        (
+            format!("{} [ARMING]", DeviceMode::Pir.as_str()),
+            format!("Arming in: {countdown}s"),
+            "Motion ignored".to_string(),
+        )
+    } else if status.pir_mode.armed {
+        let motion_line = if status.pir {
+            "Motion: DETECTED"
+        } else {
+            "Motion: CLEAR"
+        };
+        (
+            format!("{} [ARMED]", DeviceMode::Pir.as_str()),
+            motion_line.to_string(),
+            "Monitoring active".to_string(),
+        )
+    } else {
+        let pir_state = if status.pir {
+            "PIR: DETECTED"
+        } else {
+            "PIR: CLEAR"
+        };
+        (
+            format!("{} [IDLE]", DeviceMode::Pir.as_str()),
+            pir_state.to_string(),
+            "Btn2: Arm (10s delay)".to_string(),
+        )
+    };
+
+    Text::with_baseline(
+        header.as_str(),
+        Point::new(MARGIN_LEFT, MARGIN_TOP),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(display)
+    .map_err(|_| "failed to draw PIR_MODE label".to_string())?;
+
+    Text::with_baseline(
+        line1.as_str(),
+        Point::new(MARGIN_LEFT, MARGIN_TOP + 10),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(display)
+    .map_err(|_| "failed to draw PIR_MODE detail line 1".to_string())?;
+
+    Text::with_baseline(
+        line2.as_str(),
+        Point::new(MARGIN_LEFT, MARGIN_TOP + 20),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(display)
+    .map_err(|_| "failed to draw PIR_MODE detail line 2".to_string())?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(dead_code, unused_imports)]
 mod tests {
@@ -486,5 +570,49 @@ mod tests {
             truncate_display_line("this_is_a_very_long_file_name.wav", 20),
             "this_is_a_very_lo..."
         );
+    }
+
+    #[test]
+    fn renders_pir_mode_screen_all_states() {
+        let mut display: MockDisplay<BinaryColor> = MockDisplay::new();
+        display.set_allow_overdraw(true);
+        display.set_allow_out_of_bounds_drawing(true);
+        let wifi = mock_wifi();
+        let style = default_text_style();
+
+        // 1. Idle (motion clear)
+        let status_idle = SystemStatus::from_runtime(true);
+        assert!(render_pir_screen(&mut display, &status_idle, style).is_ok());
+        assert!(render_mode_screen(&mut display, DeviceMode::Pir, &wifi, &status_idle, style).is_ok());
+
+        // 2. Idle (motion detected)
+        let status_idle_motion = SystemStatus::from_runtime_with_sensors(true, true, true, SdCardStatus::Empty, 100);
+        assert!(render_pir_screen(&mut display, &status_idle_motion, style).is_ok());
+
+        // 3. Arming countdown
+        let mut status_arming = SystemStatus::from_runtime(true);
+        status_arming.pir_mode.arming_countdown = Some(7);
+        assert!(render_pir_screen(&mut display, &status_arming, style).is_ok());
+
+        // 4. Armed monitoring (no motion)
+        let mut status_armed_clear = SystemStatus::from_runtime(true);
+        status_armed_clear.pir_mode.armed = true;
+        assert!(render_pir_screen(&mut display, &status_armed_clear, style).is_ok());
+
+        // 5. Armed monitoring (motion detected)
+        let mut status_armed_motion = SystemStatus::from_runtime_with_sensors(true, true, true, SdCardStatus::Empty, 100);
+        status_armed_motion.pir_mode.armed = true;
+        assert!(render_pir_screen(&mut display, &status_armed_motion, style).is_ok());
+
+        // 6. Recording in progress with remaining seconds
+        let mut status_rec = SystemStatus::from_runtime(true);
+        status_rec.pir_mode.armed = true;
+        status_rec.pir_mode.recording_remaining_secs = Some(18);
+        status_rec.recording = Some(crate::audio::ActiveRecordingInfo {
+            filename: "20261001_011243.wav".to_string(),
+            duration_secs: 2,
+            frames_recorded: 100,
+        });
+        assert!(render_pir_screen(&mut display, &status_rec, style).is_ok());
     }
 }

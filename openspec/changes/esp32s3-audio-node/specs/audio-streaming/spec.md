@@ -177,4 +177,31 @@ The system SHALL expose web endpoints to list stored recordings, stream playback
 - **WHEN** a browser client issues a deletion request for a stored recording
 - **THEN** the device SHALL remove the file from the SD card and confirm deletion
 
+### Requirement: PIR_MODE supports motion-triggered recording
+The system SHALL support a `PIR_MODE` that detects movement using the PIR sensor (GPIO 3) and automatically records audio to the SD card. When initiated via Button 2, the system provides a 10-second arming delay before activating motion monitoring.
+
+#### Scenario: Initiating motion monitoring with 10-second arming delay
+- **WHEN** the device is in PIR_MODE and Button 2 is pressed
+- **THEN** the system SHALL begin a 10-second arming countdown, during which motion detection is not yet active, and activate motion monitoring once the 10 seconds elapse
+
+#### Scenario: Movement triggers immediate recording while armed
+- **WHEN** motion monitoring is active in PIR_MODE and the PIR sensor detects motion
+- **THEN** the system SHALL immediately start WAV recording to `/audio/YYYYMMDD_HHMMSS.wav` on the SD card
+
+#### Scenario: Subsequent motion resets the 20-second recording timer
+- **WHEN** recording is active in PIR_MODE and new motion is detected by the PIR sensor
+- **THEN** the system SHALL reset the recording duration timer to 20 seconds from the latest motion event
+
+#### Scenario: Recording completes after 20 seconds of no motion
+- **WHEN** 20 seconds have elapsed since the last detected movement without further motion
+- **THEN** the system SHALL cleanly finalize the WAV recording and return to the active motion monitoring state
+
+#### Scenario: Disarming motion monitoring or changing mode
+- **WHEN** the device is in PIR_MODE (during arming countdown, active monitoring, or recording) and Button 2 is pressed again, or Button 1 is short-pressed to change mode
+- **THEN** the system SHALL disarm motion monitoring (and finalize/stop any active recording)
+
+#### Scenario: Turning screen off while monitoring remains active
+- **WHEN** motion monitoring or recording is active in PIR_MODE and Button 1 is pressed for at least the long-press threshold
+- **THEN** the system SHALL turn off the OLED display while keeping motion monitoring and recording active in the background
+
 

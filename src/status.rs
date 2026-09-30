@@ -1,6 +1,13 @@
 use crate::audio::{ActivePlaybackInfo, ActiveRecordingInfo};
 use crate::sd::{check_sd_card_is_writable, SdCardStatus};
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PirModeStatus {
+    pub armed: bool,
+    pub arming_countdown: Option<u8>,
+    pub recording_remaining_secs: Option<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemStatus {
     pub wifi: bool,
@@ -12,6 +19,7 @@ pub struct SystemStatus {
     pub recording: Option<ActiveRecordingInfo>,
     pub playback: Option<ActivePlaybackInfo>,
     pub selected_file_index: usize,
+    pub pir_mode: PirModeStatus,
 }
 
 impl SystemStatus {
@@ -26,6 +34,7 @@ impl SystemStatus {
             recording: None,
             playback: None,
             selected_file_index: 0,
+            pir_mode: PirModeStatus::default(),
         }
     }
 
@@ -41,6 +50,11 @@ impl SystemStatus {
 
     pub fn with_selected_file_index(mut self, index: usize) -> Self {
         self.selected_file_index = index;
+        self
+    }
+
+    pub fn with_pir_mode(mut self, pir_mode: PirModeStatus) -> Self {
+        self.pir_mode = pir_mode;
         self
     }
 
@@ -62,6 +76,7 @@ impl SystemStatus {
             recording: None,
             playback: None,
             selected_file_index: 0,
+            pir_mode: PirModeStatus::default(),
         }
     }
 
@@ -82,6 +97,7 @@ impl SystemStatus {
             recording: None,
             playback: None,
             selected_file_index: 0,
+            pir_mode: PirModeStatus::default(),
         }
     }
 
@@ -127,6 +143,7 @@ mod tests {
             recording: None,
             playback: None,
             selected_file_index: 0,
+            pir_mode: PirModeStatus::default(),
         };
 
         let summary = status.summary_lines();
