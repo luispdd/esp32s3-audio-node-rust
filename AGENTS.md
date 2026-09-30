@@ -75,9 +75,13 @@ cargo espflash monitor --port /dev/ttyACM0
 
 # Quick 3-second serial log inspection (non-blocking)
 timeout 3 cargo espflash monitor --port /dev/ttyACM0
+
+# Non-blocking software reboot into app (avoids ROM download mode)
+python3 -c "import serial, time; s = serial.Serial('/dev/ttyACM0', 115200, timeout=1); s.dtr = False; s.rts = True; time.sleep(0.1); s.rts = False; s.close()"
 ```
 > [!NOTE]
 > - `espflash` is installed as a Cargo subcommand (`cargo-espflash` at `~/.cargo/bin/cargo-espflash`). Always invoke it via `cargo espflash ...` or the full binary path.
+> - **DTR/RTS Bootloader Trap:** On the ESP32-S3 USB-JTAG/CDC interface, serial monitors that toggle DTR and RTS simultaneously trigger the chip's ROM download bootloader (`DOWNLOAD(USB/UART0)`). To perform a clean reset into the flashed user application partition without entering download mode, assert `RTS=True` (EN low) while keeping `DTR=False` (BOOT high), sleep 100ms, then release `RTS=False` (EN high).
 > - When testing device web endpoints over LAN, use `curl -m 2 http://<DEVICE_IP>/status` or `curl -m 2 http://<DEVICE_IP>/api/recordings`.
 
 ---
@@ -103,7 +107,8 @@ src/
     ├── mod.rs      # Audio module root
     ├── frame.rs    # AudioFrame data structures
     ├── mic.rs      # INMP441 Microphone driver & signal detection
-    ├── recorder.rs # Ogg Opus / audio recording worker and lifecycle controller
+    ├── playback.rs # On-device WAV playback worker & lifecycle controller
+    ├── recorder.rs # Standard WAV audio recording worker and lifecycle controller
     └── stream.rs   # LiveAudioStream capture logic & HTTP streaming server
 ```
 
@@ -114,8 +119,10 @@ src/
    - Add/edit per-mode screens directly in `render_status_screen`, `render_live_screen`, or `render_sd_screen`. `App::run` delegates rendering via `display.render(mode, connection, status)`.
 2. **Button Interactions (`src/modes.rs` & `src/app.rs`):**
    - **Button 1 (GPIO 5):** Managed by `ModeButtonController`. Short press (< 800ms): `ModeButtonAction::CycleMode`. Long press (>= 800ms): `ModeButtonAction::TurnScreenOff`. Press when screen is off: `ModeButtonAction::TurnScreenOn` (wakes display without cycling mode).
-   - **Button 2 (GPIO 7 physically):** Configured with internal pull-up (`Pull::Up`), active-low. In `SD_MODE`, toggles start/stop recording.
-   - **Button 3 (GPIO 6 physically):** Configured with internal pull-up (`Pull::Up`), active-low. In `SD_MODE`, cancels in-progress recording and discards file.
+   - **Button 2 (GPIO 7 physically):** Configured with internal pull-up (`Pull::Up`), active-low. In `SD_MODE`, index 0 is `[Record new]` (default on entering `SD_MODE`). When cursor is on `[Record new]`, pressing Button 2 starts recording; when cursor is over an existing file, pressing Button 2 toggles playback. While recording is in progress, pressing Button 2 stops and saves the recording. Long press (>= 800ms) also starts recording.
+   - **Button 3 (GPIO 6 physically):** Configured with internal pull-up (`Pull::Up`), active-low. In `SD_MODE`, short press advances cursor through `[Record new]` and existing recordings in reverse chronological order (wrapping around). While recording is in progress, pressing Button 3 cancels and discards the file.
+   - **Dual-Button Chord (B2 + B3):** In `SD_MODE`, simultaneously holding Button 2 and Button 3 for >= 1000ms deletes the currently selected recording (ignored when cursor is on `[Record new]`).
+   - **Button Release Suppression Rule:** When leading-edge actions (`StopRecording`, `CancelRecording`, `TogglePlayback`) transition device states while the button is still physically depressed, the controller MUST set release suppression flags (`b2_suppress_release` / `b3_suppress_release`). This prevents the subsequent physical release of the button (100-250ms later) from being misidentified as a new short-press gesture in the resulting idle state.
 3. **Microphone Acquisition (`src/audio/mic.rs`):**
    - Use `Microphone::new(i2s0, pins.gpio14, pins.gpio15, pins.gpio16)` to initialize the INMP441 (Philips standard, 16 kHz, 32-bit slot).
    - Must call `driver.rx_enable()?` on driver initialization.
@@ -126,6 +133,7 @@ src/
    - Do **NOT** call `Peripherals::take()` inside helper functions. Pass acquired pins/peripherals down from `App::run`.
    - MicroSD operates on SPI3 with FATFS mounted at `/sdcard`. Recordings belong in `/sdcard/audio`.
    - **Stack & Memory Rule for SD File IO:** Any thread executing FATFS/SD operations (e.g. `File::create`, `write`) must have its stack allocated in **internal SRAM** (`< 16 KB`) with 32-bit alignment capabilities: `enum_set!(MallocCap::Internal | MallocCap::Cap32bit | MallocCap::Cap8bit)`. Allocating stack in PSRAM or omitting `Cap32bit` triggers MMU bus contention and `LoadStoreAlignment` hardware panics on Xtensa.
+   - **FATFS File Open & Seek Permissions:** Files opened for recording MUST use `OpenOptions::new().read(true).write(true).create(true).truncate(true)` so FATFS allows seek operations. When finalizing the WAV container, `BufWriter::flush()` MUST be called prior to seeking to offsets 4 and 40 to ensure all audio samples are written to disk before header length fields are overwritten.
 6. **Live Audio Capture & Ring Buffer (`src/audio/stream.rs` & `src/audio/mic.rs`):**
    - Real-time I2S audio capture runs in a dedicated worker thread pinned to **Core 1** via `ThreadSpawnConfiguration` (`Core::Core1`).
    - Use `SharedAudioBuffer` (PSRAM-backed ring buffer) to decouple real-time capture from Core 0 network/recording tasks. Consumers track progress with monotonic sequence IDs without blocking the capture thread.
@@ -134,6 +142,7 @@ src/
 7. **HTTP Server & Web Client Efficiency (`web/index.html` & `src/audio/stream.rs`):**
    - Browser UI templates must live in `web/index.html` (embedded via `include_str!("../../web/index.html")` using `{{ENDPOINT}}` substitution) to keep web assets and Rust code cleanly decoupled.
    - Live audio endpoint `/stream.wav` streams chunked 16-bit PCM prefixed by a 44-byte WAV header (`create_wav_header`) with `0x7fff_ffff` streaming chunk size.
+   - Stored recording endpoints: `GET /api/recordings` (JSON listing with date and size), `GET /recordings/{filename}` (streams `audio/wav`), and `DELETE /api/recordings?filename=...` (deletes file from SD).
    - **Energy-Efficiency Rule:** Avoid automatic high-frequency polling loops (e.g. `setInterval(pollStatus, 1500)`) in the web client. Battery and low-power IoT operation requires pulling status on page load and on explicit user interaction via a **Refresh** button.
 8. **Wi-Fi Driver Persistence (`src/network.rs`):**
    - `BlockingWifi` / `EspWifi` shuts down the radio on drop. Keep the driver permanently active using `std::mem::forget(wifi)` in `connect_with_modem`.
@@ -149,6 +158,15 @@ src/
 12. **Audio Recording Architecture (Standard WAV):**
     - Recordings are stored in standard 16 kHz 16-bit mono RIFF WAV format (`/sdcard/audio/YYYYMMDD_HHMMSS.wav`).
     - Standard WAV avoids compression memory overhead, eliminates FreeRTOS thread stack overflows, avoids Xtensa LLVM codegen bugs associated with pure-Rust Opus, and provides out-of-the-box browser playback (`audio/wav`).
+13. **Audio Playback Architecture (`src/audio/playback.rs`):**
+    - Managed by `PlaybackController`. Spawns a background worker pinned to **Core 0** that reads 16 kHz 16-bit mono PCM samples from the selected file and feeds them into `SharedAudioBuffer`.
+    - While playback is active, Core 1 audio capture mutes microphone sample forwarding to `SharedAudioBuffer` so listeners on `/stream.wav` and the web visualizer hear and see the recording playback without acoustic feedback or mic contention.
+    - OLED screen in `SD_MODE` displays `SD_MODE [PLAY]`, current/total duration (`MM:SS / MM:SS`), and the filename. Stopping playback or EOF restores live mic capture and returns to the file browser.
+14. **File Ordering & Screen Synchronization (`src/sd.rs` & `src/display.rs`):**
+    - Recordings follow chronological filenames `YYYYMMDD_HHMMSS.wav`. Alphabetical sorting places newest files at the end; therefore, both `inspect_audio_folder` (OLED rendering) and `list_audio_files` (web API & navigation) MUST reverse the sort (`files.sort(); files.reverse()`) to ensure index 0 represents the newest file.
+    - `SD_MODE` prefixes the list with `[Record new]` at index 0. Existing recordings map to `files[selected_index - 1]`.
+15. **Synchronous Worker Finalization (`src/audio/recorder.rs`):**
+    - `RecordingController::stop()` and `cancel()` must block with a bounded loop (`while self.is_recording() && ...`) to guarantee the Core 0 worker thread finishes flushing, updates WAV headers, and closes file handles before the caller refreshes directory metadata (`card.inspect()`) or updates display state.
 
 ---
 

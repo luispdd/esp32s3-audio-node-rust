@@ -1,4 +1,4 @@
-use crate::audio::ActiveRecordingInfo;
+use crate::audio::{ActivePlaybackInfo, ActiveRecordingInfo};
 use crate::sd::{check_sd_card_is_writable, SdCardStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +10,7 @@ pub struct SystemStatus {
     pub sd_card: SdCardStatus,
     pub gain_percent: u8,
     pub recording: Option<ActiveRecordingInfo>,
+    pub playback: Option<ActivePlaybackInfo>,
     pub selected_file_index: usize,
 }
 
@@ -23,12 +24,18 @@ impl SystemStatus {
             sd_card,
             gain_percent,
             recording: None,
+            playback: None,
             selected_file_index: 0,
         }
     }
 
     pub fn with_recording(mut self, recording: Option<ActiveRecordingInfo>) -> Self {
         self.recording = recording;
+        self
+    }
+
+    pub fn with_playback(mut self, playback: Option<ActivePlaybackInfo>) -> Self {
+        self.playback = playback;
         self
     }
 
@@ -53,6 +60,7 @@ impl SystemStatus {
             sd_card,
             gain_percent: 100,
             recording: None,
+            playback: None,
             selected_file_index: 0,
         }
     }
@@ -72,6 +80,7 @@ impl SystemStatus {
             sd_card,
             gain_percent,
             recording: None,
+            playback: None,
             selected_file_index: 0,
         }
     }
@@ -115,6 +124,9 @@ mod tests {
             sd: true,
             sd_card: SdCardStatus::Empty,
             gain_percent: 75,
+            recording: None,
+            playback: None,
+            selected_file_index: 0,
         };
 
         let summary = status.summary_lines();

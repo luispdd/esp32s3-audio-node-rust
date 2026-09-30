@@ -412,6 +412,9 @@ function togglePlay() {
 audio.addEventListener('play', () => {
   btn.textContent = "Pause Stream";
   btn.className = "btn-stop";
+  if (playAudio && !playAudio.paused) {
+    playAudio.pause();
+  }
   setupAudioContext();
   drawVisualizer();
 });
@@ -547,7 +550,7 @@ function fetchRecordings() {
           <div class="file-item">
             <div class="file-info">
               <span class="file-name" title="${f.filename}">${f.filename}</span>
-              <span class="file-meta">${formatBytes(f.size)}</span>
+              <span class="file-meta">${formatBytes(f.size)}${f.date ? ' • ' + f.date : ''}</span>
             </div>
             <div class="file-actions">
               <button class="btn-sm btn-play" onclick="playRecording('${f.filename}')">▶ Play</button>
@@ -624,6 +627,9 @@ function cancelRecording() {
 }
 
 function playRecording(filename) {
+  if (!audio.paused) {
+    togglePlay();
+  }
   playTitle.textContent = `Now Playing: ${filename}`;
   playAudio.src = `/recordings/${filename}`;
   playContainer.style.display = 'block';

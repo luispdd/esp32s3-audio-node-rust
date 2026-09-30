@@ -71,6 +71,7 @@ pub fn inspect_audio_folder(audio_dir_path: &str) -> SdCardStatus {
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .collect();
             files.sort();
+            files.reverse();
             if files.is_empty() {
                 SdCardStatus::Empty
             } else {
@@ -251,7 +252,7 @@ mod tests {
         let status = inspect_audio_folder(test_dir);
         match status {
             SdCardStatus::Files(files) => {
-                assert_eq!(files, vec!["rec001.wav", "rec002.wav", "rec003.wav"]);
+                assert_eq!(files, vec!["rec003.wav", "rec002.wav", "rec001.wav"]);
             }
             other => panic!("expected Files status, got {:?}", other),
         }

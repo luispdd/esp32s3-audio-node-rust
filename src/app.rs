@@ -164,7 +164,7 @@ impl App {
 
         // Start real-time audio capture worker on Core 1 if microphone is initialized
         let capture_buffer = audio_buffer.clone();
-        let _capture_thread = if let Ok(mut active_mic) = mic {
+        let (playback_controller, _capture_thread) = if let Ok(mut active_mic) = mic {
             #[cfg(target_arch = "xtensa")]
             {
                 use esp_idf_svc::hal::cpu::Core;
@@ -179,53 +179,62 @@ impl App {
                 let _ = thread_config.set();
             }
 
-            Some(
-                std::thread::Builder::new()
-                    .name("audio-capture".into())
-                    .stack_size(8192)
-                    .spawn(move || {
-                        log::info!("Audio capture worker thread started on Core 1");
-                        loop {
-                            // Poll the physical potentiometer every frame so its value is always
-                            // fresh and ready to be applied the moment the web override is lifted.
-                            if let Ok(ref mut pot) = potentiometer {
-                                match pot.read_gain() {
-                                    Ok(g) => {
-                                        let pct = pot.last_gain_percent();
-                                        capture_buffer.set_gain(g, pct);
+            let capture_playback = crate::audio::PlaybackController::new();
+            let pb_for_capture = capture_playback.clone();
+            (
+                capture_playback,
+                Some(
+                    std::thread::Builder::new()
+                        .name("audio-capture".into())
+                        .stack_size(8192)
+                        .spawn(move || {
+                            log::info!("Audio capture worker thread started on Core 1");
+                            loop {
+                                // Poll the physical potentiometer every frame so its value is always
+                                // fresh and ready to be applied the moment the web override is lifted.
+                                if let Ok(ref mut pot) = potentiometer {
+                                    match pot.read_gain() {
+                                        Ok(g) => {
+                                            let pct = pot.last_gain_percent();
+                                            capture_buffer.set_gain(g, pct);
+                                        }
+                                        Err(err) => {
+                                            log::warn!("Potentiometer read error: {err}");
+                                        }
+                                    }
+                                }
+
+                                // Active gain respects the web override if enabled, else uses potentiometer
+                                let current_gain = capture_buffer.current_gain();
+
+                                match active_mic.read_frame_with_gain(320, 50, current_gain) {
+                                    Ok(frame) => {
+                                        // Only push live microphone frames when audio playback is not playing
+                                        if !pb_for_capture.is_playing() {
+                                            capture_buffer.push_frame(frame);
+                                        }
                                     }
                                     Err(err) => {
-                                        log::warn!("Potentiometer read error: {err}");
+                                        log::warn!("Microphone read error: {err}");
+                                        thread::sleep(Duration::from_millis(20));
                                     }
                                 }
                             }
-
-                            // Active gain respects the web override if enabled, else uses potentiometer
-                            let current_gain = capture_buffer.current_gain();
-
-                            match active_mic.read_frame_with_gain(320, 50, current_gain) {
-                                Ok(frame) => {
-                                    capture_buffer.push_frame(frame);
-                                }
-                                Err(err) => {
-                                    log::warn!("Microphone read error: {err}");
-                                    thread::sleep(Duration::from_millis(20));
-                                }
-                            }
-                        }
-                    })
-                    .map_err(|err| format!("Failed to spawn audio capture thread: {err}")),
+                        })
+                        .map_err(|err| format!("Failed to spawn audio capture thread: {err}")),
+                ),
             )
         } else {
-            None
+            (crate::audio::PlaybackController::new(), None)
         };
 
         let recording_controller = crate::audio::RecordingController::new();
 
-        // Start live audio and recording HTTP server on Core 0
+        // Start live audio, recording, and playback HTTP server on Core 0
         let _http_server = crate::audio::LiveAudioStream::start_server(
             audio_buffer.clone(),
             recording_controller.clone(),
+            playback_controller.clone(),
             80,
         );
         match &_http_server {
@@ -315,6 +324,9 @@ impl App {
                 ModeButtonAction::CycleMode => {
                     let previous_mode = current_mode;
                     current_mode = current_mode.next();
+                    if current_mode == DeviceMode::Sd {
+                        selected_file_index = 0;
+                    }
                     log::info!(
                         "Mode switch on GPIO 5: {} -> {}",
                         previous_mode.as_str(),
@@ -337,38 +349,75 @@ impl App {
 
             if current_mode == DeviceMode::Sd {
                 let is_rec = recording_controller.is_recording();
-                match sd_button_controller.update(b2_down, b3_down, is_rec) {
+                let is_play = playback_controller.is_playing();
+                match sd_button_controller.update(b2_down, b3_down, is_rec, is_play) {
+                    SdButtonAction::TogglePlayback => {
+                        if playback_controller.is_playing() {
+                            let _ = playback_controller.stop();
+                            log::info!("Playback stopped via Button 2");
+                        } else if selected_file_index == 0 {
+                            let audio_dir = crate::sd::get_audio_dir();
+                            match recording_controller.start(audio_dir, audio_buffer.clone()) {
+                                Ok(info) => log::info!("Started recording to {} via [Record new]", info.filename),
+                                Err(err) => log::warn!("Failed to start recording: {err}"),
+                            }
+                        } else {
+                            let files = crate::sd::list_audio_files();
+                            let file_idx = selected_file_index - 1;
+                            if file_idx < files.len() {
+                                let filename = &files[file_idx];
+                                let audio_dir = crate::sd::get_audio_dir();
+                                match playback_controller.start(audio_dir, filename, audio_buffer.clone()) {
+                                    Ok(info) => log::info!(
+                                        "Started playback of {} ({}s) via Button 2",
+                                        info.filename,
+                                        info.total_secs
+                                    ),
+                                    Err(err) => log::warn!("Failed to start playback of {}: {}", filename, err),
+                                }
+                            }
+                        }
+                    }
                     SdButtonAction::NextFile => {
+                        if playback_controller.is_playing() {
+                            let _ = playback_controller.stop();
+                        }
                         let files = crate::sd::list_audio_files();
-                        if !files.is_empty() {
-                            selected_file_index = (selected_file_index + 1) % files.len();
+                        let total_items = files.len() + 1;
+                        selected_file_index = (selected_file_index + 1) % total_items;
+                        if selected_file_index == 0 {
+                            log::info!("Selected item [1/{total_items}]: [Record new]");
+                        } else {
                             log::info!(
                                 "Selected recording [{}/{}]: {}",
                                 selected_file_index + 1,
-                                files.len(),
-                                files[selected_file_index]
+                                total_items,
+                                files[selected_file_index - 1]
                             );
                         }
                     }
                     SdButtonAction::PrevFile => {
+                        if playback_controller.is_playing() {
+                            let _ = playback_controller.stop();
+                        }
                         let files = crate::sd::list_audio_files();
-                        if !files.is_empty() {
-                            selected_file_index = (selected_file_index + files.len() - 1) % files.len();
+                        let total_items = files.len() + 1;
+                        selected_file_index = (selected_file_index + total_items - 1) % total_items;
+                        if selected_file_index == 0 {
+                            log::info!("Selected item [1/{total_items}]: [Record new]");
+                        } else {
                             log::info!(
                                 "Selected recording [{}/{}]: {}",
                                 selected_file_index + 1,
-                                files.len(),
-                                files[selected_file_index]
+                                total_items,
+                                files[selected_file_index - 1]
                             );
-                        } else {
-                            let audio_dir = crate::sd::get_audio_dir();
-                            match recording_controller.start(audio_dir, audio_buffer.clone()) {
-                                Ok(info) => log::info!("Started recording to {}", info.filename),
-                                Err(err) => log::warn!("Failed to start recording: {err}"),
-                            }
                         }
                     }
                     SdButtonAction::StartRecording => {
+                        if playback_controller.is_playing() {
+                            let _ = playback_controller.stop();
+                        }
                         let audio_dir = crate::sd::get_audio_dir();
                         match recording_controller.start(audio_dir, audio_buffer.clone()) {
                             Ok(info) => {
@@ -384,6 +433,9 @@ impl App {
                             Ok(filename) => {
                                 log::info!("Recording stopped and saved: {filename}");
                                 selected_file_index = 0;
+                                if let Ok(card) = &sd_card {
+                                    sd_status = card.inspect();
+                                }
                             }
                             Err(err) => {
                                 log::warn!("Failed to stop recording: {err}");
@@ -394,6 +446,9 @@ impl App {
                         match recording_controller.cancel() {
                             Ok(()) => {
                                 log::info!("Recording cancelled and discarded");
+                                if let Ok(card) = &sd_card {
+                                    sd_status = card.inspect();
+                                }
                             }
                             Err(err) => {
                                 log::warn!("Failed to cancel recording: {err}");
@@ -401,25 +456,35 @@ impl App {
                         }
                     }
                     SdButtonAction::DeleteSelectedFile => {
-                        let audio_dir = crate::sd::get_audio_dir();
-                        let files = crate::sd::list_audio_files();
-                        if !files.is_empty() && selected_file_index < files.len() {
-                            let file_to_delete = &files[selected_file_index];
-                            let path = format!("{audio_dir}/{file_to_delete}");
-                            match std::fs::remove_file(&path) {
-                                Ok(_) => {
-                                    log::info!(
-                                        "Deleted selected recording: {file_to_delete} via dual-button chord (B2+B3)"
-                                    );
-                                    let new_len = files.len() - 1;
-                                    if selected_file_index >= new_len && new_len > 0 {
-                                        selected_file_index = new_len - 1;
-                                    } else if new_len == 0 {
-                                        selected_file_index = 0;
+                        if playback_controller.is_playing() {
+                            let _ = playback_controller.stop();
+                        }
+                        if selected_file_index == 0 {
+                            log::info!("Cannot delete '[Record new]' option");
+                        } else {
+                            let audio_dir = crate::sd::get_audio_dir();
+                            let files = crate::sd::list_audio_files();
+                            let file_idx = selected_file_index - 1;
+                            if file_idx < files.len() {
+                                let file_to_delete = &files[file_idx];
+                                let path = format!("{audio_dir}/{file_to_delete}");
+                                match std::fs::remove_file(&path) {
+                                    Ok(_) => {
+                                        log::info!(
+                                            "Deleted selected recording: {file_to_delete} via dual-button chord (B2+B3)"
+                                        );
+                                        let remaining_files = files.len() - 1;
+                                        let new_total = remaining_files + 1;
+                                        if selected_file_index >= new_total {
+                                            selected_file_index = new_total - 1;
+                                        }
+                                        if let Ok(card) = &sd_card {
+                                            sd_status = card.inspect();
+                                        }
                                     }
-                                }
-                                Err(err) => {
-                                    log::warn!("Failed to delete recording {file_to_delete}: {err}");
+                                    Err(err) => {
+                                        log::warn!("Failed to delete recording {file_to_delete}: {err}");
+                                    }
                                 }
                             }
                         }
@@ -448,6 +513,7 @@ impl App {
                     }
                 }
                 let active_rec = recording_controller.current_recording();
+                let active_pb = playback_controller.current_playback();
                 system_status = SystemStatus::from_runtime_with_sensors(
                     connection.connected,
                     mic_detected,
@@ -456,6 +522,7 @@ impl App {
                     gain_percent,
                 )
                 .with_recording(active_rec)
+                .with_playback(active_pb)
                 .with_selected_file_index(selected_file_index);
                 display.render(current_mode, &connection, &system_status)?;
             }

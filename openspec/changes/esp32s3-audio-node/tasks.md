@@ -43,17 +43,17 @@
 
 - [x] 4.1 Implement a ntp client to synchronize the system time with the internet time once the device is connected to the network.
 - [x] 4.2 Implement standard WAV (RIFF PCM16 16 kHz) recording pipeline and verify data is written to an SD card file in the expected format. Use the date and time from the moment of starting the recording to name the file in the format `YYYYMMDD_HHMMSS.wav`. The files will be created at the folder `/audio`.
-- [ ] 4.3 Add start/stop recording controls and verify a recording is created, finalized, and stored on the device. To start the recording the device must be in SD_MODE, and will be started using button 2 (GPIO 7). The recording will stop when button 2 (GPIO 7) is pressed again. The recording will be cancelled and the recording discarded if button 3 (GPIO 6) is pressed while the recording is in progress.
+- [x] 4.3 Add start/stop recording controls and verify a recording is created, finalized, and stored on the device. To start the recording the device must be in SD_MODE, and will be started using button 2 (GPIO 7). The recording will stop when button 2 (GPIO 7) is pressed again. The recording will be cancelled and the recording discarded if button 3 (GPIO 6) is pressed while the recording is in progress.
 - [x] 4.4 Validate recording behavior under the project's expected audio load and verify the file remains readable after finalization
 - [x] 4.5 Add web interface controls to start/stop/delete recordings and display the list of recordings
 
 ## 5. Playback of Stored Audio
 
-- [ ] 5.1 Expose a browser-accessible listing or direct endpoint for recorded files and verify the device serves stored content correctly
-- [ ] 5.2 Implement playback of stored recordings in the browser and verify the browser can play back recorded audio without external services
-- [ ] 5.3 Validate the full flow from capture to recording to storage to playback and verify the end-to-end behavior matches the spec
-- [ ] 5.4 Implement the delete recording functionality in the browser UI.
-- [ ] 5.5 On the board, implement controls to navigate among the existing recordings using button 2 (GPIO 7). The list will show the files in reverse chronological order. Button 3 (GPIO 6) will be used to skip to the next recording. To press on button 2 again will initiate the playback of the current recording and will be used to stop it if pressed again. A long press on button 2 + button 3 will delete the currently selected file.
+- [x] 5.1 Expose a browser-accessible listing or direct endpoint for recorded files and verify the device serves stored content correctly
+- [x] 5.2 Implement playback of stored recordings in the browser and verify the browser can play back recorded audio without external services
+- [x] 5.3 Validate the full flow from capture to recording to storage to playback and verify the end-to-end behavior matches the spec
+- [x] 5.4 Implement the delete recording functionality in the browser UI.
+- [x] 5.5 On the board, implement controls to navigate among the existing recordings using button 2 (GPIO 7). The list will show the files in reverse chronological order. Button 3 (GPIO 6) will be used to skip to the next recording. To press on button 2 again will initiate the playback of the current recording and will be used to stop it if pressed again. A long press on button 2 + button 3 will delete the currently selected file.
 
 ## 6. Hardening and Polish
 

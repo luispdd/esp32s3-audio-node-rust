@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +96,11 @@ impl<W: Write + Seek> WavWriter<W> {
 
     /// Finalizes the WAV file by updating the RIFF and data chunk length fields.
     pub fn finish(mut self) -> Result<W, String> {
+        // 0. Flush any buffered sample data before seeking
+        self.writer
+            .flush()
+            .map_err(|e| format!("Failed to flush audio samples before header seek: {e}"))?;
+
         // 1. Update RIFF chunk size at offset 4
         self.writer
             .seek(SeekFrom::Start(4))
@@ -183,6 +187,13 @@ impl RecordingController {
         }
         log::warn!("Cancelling active recording and discarding file");
         self.shared.cancel_flag.store(true, Ordering::SeqCst);
+
+        // Wait up to 500ms for worker thread to finish cleaning up
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while self.is_recording() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
         Ok(())
     }
 
@@ -193,6 +204,13 @@ impl RecordingController {
             .ok_or_else(|| "No active recording to stop".to_string())?;
         log::info!("Stopping active recording: {}", info.filename);
         self.shared.stop_flag.store(true, Ordering::SeqCst);
+
+        // Wait up to 500ms for worker thread to finalize file and return to Idle
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while self.is_recording() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
         Ok(info.filename)
     }
 
@@ -207,11 +225,8 @@ impl RecordingController {
         }
 
         // 1. Ensure directory exists
+        crate::sd::ensure_audio_folder(audio_dir)?;
         let dir_path = Path::new(audio_dir);
-        if !dir_path.exists() {
-            std::fs::create_dir_all(dir_path)
-                .map_err(|e| format!("Failed to create audio dir {audio_dir}: {e}"))?;
-        }
 
         // 2. Generate filename based on current UTC time (e.g. YYYYMMDD_HHMMSS.wav)
         let now = UtcDateTime::now();
@@ -286,7 +301,13 @@ fn run_recorder_worker(
 ) {
     log::info!("Recording worker started for {:?}", file_path);
 
-    let file = match File::create(&file_path) {
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&file_path)
+    {
         Ok(f) => f,
         Err(e) => {
             log::error!("Failed to create recording file {:?}: {e}", file_path);

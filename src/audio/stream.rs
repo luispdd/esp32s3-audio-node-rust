@@ -347,6 +347,7 @@ impl LiveAudioStream {
     pub fn start_server(
         shared_buffer: SharedAudioBuffer,
         recording_controller: crate::audio::RecordingController,
+        playback_controller: crate::audio::PlaybackController,
         port: u16,
     ) -> Result<ServerHandle, String> {
         let stream_port = 8080;
@@ -395,6 +396,7 @@ impl LiveAudioStream {
 
         let status_buffer = shared_buffer.clone();
         let status_recorder = recording_controller.clone();
+        let status_playback = playback_controller.clone();
         main_server
             .fn_handler("/status*", Method::Get, move |req| -> Result<(), EspIOError> {
                 let listeners = status_buffer.active_listeners();
@@ -407,9 +409,14 @@ impl LiveAudioStream {
                     Some(info) => (true, info.filename, info.duration_secs, info.frames_recorded),
                     None => (false, String::new(), 0, 0),
                 };
+                let pb_info = status_playback.current_playback();
+                let (is_play, pb_fn, pb_dur, pb_total) = match pb_info {
+                    Some(info) => (true, info.filename, info.duration_secs, info.total_secs),
+                    None => (false, String::new(), 0, 0),
+                };
                 let body = format!(
-                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{}}}"#,
-                    signal, listeners, gain_percent, override_active, override_percent, is_rec, rec_fn, rec_dur, rec_frames
+                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{},"playback":{},"playback_filename":"{}","playback_duration":{},"playback_total":{}}}"#,
+                    signal, listeners, gain_percent, override_active, override_percent, is_rec, rec_fn, rec_dur, rec_frames, is_play, pb_fn, pb_dur, pb_total
                 );
                 let headers = [
                     ("Content-Type", "application/json"),
@@ -543,7 +550,17 @@ impl LiveAudioStream {
                 for f in files {
                     let path = std::path::Path::new(audio_dir).join(&f);
                     let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    items.push(format!(r#"{{"filename":"{}","size":{}}}"#, f, size));
+                    let date_str = if f.len() >= 15 && f.contains('_') {
+                        let base = f.trim_end_matches(".wav").trim_end_matches(".opus");
+                        if base.len() == 15 && base.as_bytes()[8] == b'_' {
+                            format!("{}-{}-{} {}:{}:{}", &base[0..4], &base[4..6], &base[6..8], &base[9..11], &base[11..13], &base[13..15])
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    items.push(format!(r#"{{"filename":"{}","size":{},"date":"{}"}}"#, f, size, date_str));
                 }
                 let json = format!(r#"{{"status":"ok","recordings":[{}]}}"#, items.join(","));
                 let headers = [
@@ -569,15 +586,23 @@ impl LiveAudioStream {
                     .trim_matches('/')
                     .to_string()
                 };
-                let base_dir = crate::sd::get_audio_dir();
-                let file_path = std::path::Path::new(base_dir).join(&filename);
-                let (code, msg) = if file_path.exists() && file_path.is_file() {
-                    match std::fs::remove_file(&file_path) {
-                        Ok(()) => (200, format!(r#"{{"status":"ok","deleted":"{}"}}"#, filename)),
-                        Err(e) => (500, format!(r#"{{"status":"error","message":"{}"}}"#, e)),
-                    }
+                let (code, msg) = if filename.is_empty()
+                    || filename.contains("..")
+                    || filename.contains('/')
+                    || filename.contains('\\')
+                {
+                    (400, r#"{"status":"error","message":"invalid filename"}"#.to_string())
                 } else {
-                    (404, r#"{"status":"error","message":"file not found"}"#.to_string())
+                    let base_dir = crate::sd::get_audio_dir();
+                    let file_path = std::path::Path::new(base_dir).join(&filename);
+                    if file_path.exists() && file_path.is_file() {
+                        match std::fs::remove_file(&file_path) {
+                            Ok(()) => (200, format!(r#"{{"status":"ok","deleted":"{}"}}"#, filename)),
+                            Err(e) => (500, format!(r#"{{"status":"error","message":"{}"}}"#, e)),
+                        }
+                    } else {
+                        (404, r#"{"status":"error","message":"file not found"}"#.to_string())
+                    }
                 };
 
                 let headers = [
@@ -680,6 +705,16 @@ impl LiveAudioStream {
                         .trim_matches('/')
                         .to_string()
                 };
+                if filename.is_empty()
+                    || filename.contains("..")
+                    || filename.contains('/')
+                    || filename.contains('\\')
+                {
+                    let mut resp = req.into_response(400, Some("Bad Request"), &[("Content-Type", "text/plain")])?;
+                    resp.write_all(b"Invalid filename")?;
+                    return Ok(());
+                }
+
                 let base_dir = crate::sd::get_audio_dir();
                 let file_path = std::path::Path::new(base_dir).join(&filename);
 
@@ -736,6 +771,59 @@ impl LiveAudioStream {
                 Ok(())
             })
             .map_err(|err| format!("Failed to register /recordings handler: {err}"))?;
+
+        main_server
+            .fn_handler("/recordings/*", Method::Options, |req| -> Result<(), EspIOError> {
+                let headers = [
+                    ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Methods", "GET, OPTIONS"),
+                    ("Access-Control-Allow-Headers", "*"),
+                    ("Content-Length", "0"),
+                ];
+                let _resp = req.into_response(200, Some("OK"), &headers)?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /recordings OPTIONS handler: {err}"))?;
+
+        // ── 1d. Playback API endpoints ──────────────────────────────────────
+        let pb_start = playback_controller.clone();
+        let pb_buf = shared_buffer.clone();
+        main_server
+            .fn_handler("/api/playback/start*", Method::Post, move |req| -> Result<(), EspIOError> {
+                let uri = req.uri();
+                let filename = if let Some(idx) = uri.find("filename=") {
+                    uri[idx + 9..].split('&').next().unwrap_or("").to_string()
+                } else {
+                    String::new()
+                };
+                let audio_dir = crate::sd::get_audio_dir();
+                let (code, msg) = match pb_start.start(audio_dir, &filename, pb_buf.clone()) {
+                    Ok(info) => (200, format!(r#"{{"status":"ok","filename":"{}","total_secs":{}}}"#, info.filename, info.total_secs)),
+                    Err(e) => (400, format!(r#"{{"status":"error","message":"{}"}}"#, e)),
+                };
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Access-Control-Allow-Origin", "*"),
+                ];
+                let mut resp = req.into_response(code, Some("OK"), &headers)?;
+                resp.write_all(msg.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /api/playback/start handler: {err}"))?;
+
+        let pb_stop = playback_controller.clone();
+        main_server
+            .fn_handler("/api/playback/stop*", Method::Post, move |req| -> Result<(), EspIOError> {
+                let _ = pb_stop.stop();
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Access-Control-Allow-Origin", "*"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(br#"{"status":"ok"}"#)?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /api/playback/stop handler: {err}"))?;
 
         // ── 2. Dedicated Streaming Server (Port 8080) ────────────────────────
         // Pinned to its own FreeRTOS task so that the continuous audio streaming
@@ -853,6 +941,7 @@ impl LiveAudioStream {
     pub fn start_server(
         _shared_buffer: SharedAudioBuffer,
         _recording_controller: crate::audio::RecordingController,
+        _playback_controller: crate::audio::PlaybackController,
         _port: u16,
     ) -> Result<ServerHandle, String> {
         log::info!("Mock HTTP server started (non-xtensa architecture)");

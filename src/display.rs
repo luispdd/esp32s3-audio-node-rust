@@ -262,6 +262,16 @@ where
             format!("{:02}:{:02} ({}f)", mins, secs, rec.frames_recorded),
             truncate_display_line(&rec.filename, 20),
         )
+    } else if let Some(ref pb) = status.playback {
+        let cur_m = pb.duration_secs / 60;
+        let cur_s = pb.duration_secs % 60;
+        let tot_m = pb.total_secs / 60;
+        let tot_s = pb.total_secs % 60;
+        (
+            format!("{} [PLAY]", DeviceMode::Sd.as_str()),
+            format!("{:02}:{:02} / {:02}:{:02}", cur_m, cur_s, tot_m, tot_s),
+            truncate_display_line(&format!("*{}", pb.filename), 20),
+        )
     } else {
         match &status.sd_card {
             SdCardStatus::Unavailable(_) => (
@@ -280,26 +290,35 @@ where
             "Folder not found".to_string(),
         ),
         SdCardStatus::Empty => (
-            format!("{} (0)", DeviceMode::Sd.as_str()),
-            "/audio empty".to_string(),
-            "No files found".to_string(),
+            format!("{} (1/1)", DeviceMode::Sd.as_str()),
+            "* [Record new]".to_string(),
+            " (No files)".to_string(),
         ),
         SdCardStatus::Files(files) => {
             if files.is_empty() {
                 (
-                    format!("{} (0)", DeviceMode::Sd.as_str()),
-                    "/audio empty".to_string(),
-                    "No files found".to_string(),
+                    format!("{} (1/1)", DeviceMode::Sd.as_str()),
+                    "* [Record new]".to_string(),
+                    " (No files)".to_string(),
                 )
             } else {
-                let count = files.len();
-                let selected = status.selected_file_index.min(count.saturating_sub(1));
-                let header = format!("{} ({}/{})", DeviceMode::Sd.as_str(), selected + 1, count);
-                let line1 = format!("*{}", files[selected]);
-                let line2 = if selected + 1 < count {
-                    format!(" {}", files[selected + 1])
+                let total_items = files.len() + 1;
+                let selected = status.selected_file_index.min(total_items.saturating_sub(1));
+                let header = format!("{} ({}/{})", DeviceMode::Sd.as_str(), selected + 1, total_items);
+                let (line1, line2) = if selected == 0 {
+                    (
+                        "* [Record new]".to_string(),
+                        format!(" {}", files[0]),
+                    )
                 } else {
-                    " (end of list)".to_string()
+                    let file_idx = selected - 1;
+                    let l1 = format!("*{}", files[file_idx]);
+                    let l2 = if file_idx + 1 < files.len() {
+                        format!(" {}", files[file_idx + 1])
+                    } else {
+                        " [Record new]".to_string()
+                    };
+                    (l1, l2)
                 };
                 (
                     header,
@@ -448,7 +467,16 @@ mod tests {
                 "rec003.wav".to_string(),
             ]),
         );
+        // Default index 0 = [Record new]
         assert!(render_sd_screen(&mut display, &status_multi, style).is_ok());
+
+        // Index 1 = first file
+        let status_multi_f1 = status_multi.clone().with_selected_file_index(1);
+        assert!(render_sd_screen(&mut display, &status_multi_f1, style).is_ok());
+
+        // Index 3 = last file
+        let status_multi_last = status_multi.with_selected_file_index(3);
+        assert!(render_sd_screen(&mut display, &status_multi_last, style).is_ok());
     }
 
     #[test]
