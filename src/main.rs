@@ -9,6 +9,7 @@ mod network;
 pub mod potentiometer;
 pub mod sd;
 pub mod status;
+pub mod time;
 
 fn main() {
     // It is necessary to call this function once. Otherwise, some patches to the runtime

@@ -98,11 +98,11 @@ impl RuntimeArchitecture {
             core_0_tasks: [
                 "Wi-Fi networking",
                 "stream serving",
-                "Opus encoding",
+                "WAV audio recording",
                 "SD file writes",
                 "buffer management",
             ],
-            psram_buffers: "PSRAM-backed audio and codec buffers absorb SD write stalls without dropping samples",
+            psram_buffers: "PSRAM-backed audio buffers absorb SD write stalls without dropping samples",
         }
     }
 

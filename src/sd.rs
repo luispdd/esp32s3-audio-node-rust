@@ -94,6 +94,35 @@ pub fn ensure_audio_folder(audio_dir_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Returns the primary active audio directory path.
+pub fn get_audio_dir() -> &'static str {
+    if Path::new(SD_MOUNT_POINT).exists() {
+        SD_AUDIO_DIR
+    } else if Path::new("/audio").exists() {
+        "/audio"
+    } else {
+        SD_AUDIO_DIR
+    }
+}
+
+/// Returns list of files in the audio directory in reverse chronological order (newest first).
+pub fn list_audio_files() -> Vec<String> {
+    let dir = get_audio_dir();
+    let path = Path::new(dir);
+    if let Ok(entries) = std::fs::read_dir(path) {
+        let mut files: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        files.reverse();
+        files
+    } else {
+        Vec::new()
+    }
+}
+
 /// Backward-compatible probe helper checking whether `/sdcard` is mounted and writable.
 pub fn check_sd_card_is_writable() -> bool {
     let path = Path::new(SD_MOUNT_POINT);
@@ -215,14 +244,14 @@ mod tests {
     fn inspect_folder_with_files_returns_sorted_files() {
         let test_dir = "/tmp/test_sd_audio_files_12345";
         let _ = fs::create_dir_all(test_dir);
-        fs::write(format!("{test_dir}/rec002.opus"), b"sample").unwrap();
-        fs::write(format!("{test_dir}/rec001.opus"), b"sample").unwrap();
-        fs::write(format!("{test_dir}/rec003.opus"), b"sample").unwrap();
+        fs::write(format!("{test_dir}/rec002.wav"), b"sample").unwrap();
+        fs::write(format!("{test_dir}/rec001.wav"), b"sample").unwrap();
+        fs::write(format!("{test_dir}/rec003.wav"), b"sample").unwrap();
 
         let status = inspect_audio_folder(test_dir);
         match status {
             SdCardStatus::Files(files) => {
-                assert_eq!(files, vec!["rec001.opus", "rec002.opus", "rec003.opus"]);
+                assert_eq!(files, vec!["rec001.wav", "rec002.wav", "rec003.wav"]);
             }
             other => panic!("expected Files status, got {:?}", other),
         }

@@ -115,8 +115,162 @@ impl ModeButtonController {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdButtonAction {
+    None,
+    NextFile,
+    PrevFile,
+    StartRecording,
+    StopRecording,
+    CancelRecording,
+    DeleteSelectedFile,
+}
+
+#[derive(Debug)]
+pub struct SdButtonController {
+    long_press_duration: Duration,
+    chord_duration: Duration,
+    b2_pressed_at: Option<Instant>,
+    b3_pressed_at: Option<Instant>,
+    chord_pressed_at: Option<Instant>,
+    chord_triggered: bool,
+    b2_long_press_triggered: bool,
+    b2_was_down: bool,
+    b3_was_down: bool,
+}
+
+impl SdButtonController {
+    pub const DEFAULT_LONG_PRESS_DURATION: Duration = Duration::from_millis(800);
+    pub const DEFAULT_CHORD_DURATION: Duration = Duration::from_millis(1000);
+
+    pub fn new(long_press_duration: Duration, chord_duration: Duration) -> Self {
+        Self {
+            long_press_duration,
+            chord_duration,
+            b2_pressed_at: None,
+            b3_pressed_at: None,
+            chord_pressed_at: None,
+            chord_triggered: false,
+            b2_long_press_triggered: false,
+            b2_was_down: false,
+            b3_was_down: false,
+        }
+    }
+
+    pub fn update(&mut self, b2_down: bool, b3_down: bool, is_recording: bool) -> SdButtonAction {
+        self.update_with_time(b2_down, b3_down, is_recording, Instant::now())
+    }
+
+    pub fn update_with_time(
+        &mut self,
+        b2_down: bool,
+        b3_down: bool,
+        is_recording: bool,
+        now: Instant,
+    ) -> SdButtonAction {
+        // 1. If currently recording: direct edge detection on press
+        if is_recording {
+            self.chord_pressed_at = None;
+            self.chord_triggered = false;
+            self.b2_pressed_at = None;
+            self.b3_pressed_at = None;
+            self.b2_long_press_triggered = false;
+
+            let b2_edge = b2_down && !self.b2_was_down;
+            let b3_edge = b3_down && !self.b3_was_down;
+            self.b2_was_down = b2_down;
+            self.b3_was_down = b3_down;
+
+            if b2_edge {
+                return SdButtonAction::StopRecording;
+            }
+            if b3_edge {
+                return SdButtonAction::CancelRecording;
+            }
+            return SdButtonAction::None;
+        }
+
+        self.b2_was_down = b2_down;
+        self.b3_was_down = b3_down;
+
+        // 2. Idle: Simultaneous chord detection (B2 + B3 held for >= chord_duration)
+        if b2_down && b3_down {
+            if self.chord_pressed_at.is_none() {
+                self.chord_pressed_at = Some(now);
+            }
+            if !self.chord_triggered {
+                if let Some(start) = self.chord_pressed_at {
+                    if now.saturating_duration_since(start) >= self.chord_duration {
+                        self.chord_triggered = true;
+                        return SdButtonAction::DeleteSelectedFile;
+                    }
+                }
+            }
+            return SdButtonAction::None;
+        } else {
+            self.chord_pressed_at = None;
+        }
+
+        // If chord was triggered, wait for full release of both buttons before allowing single actions
+        if self.chord_triggered {
+            if !b2_down && !b3_down {
+                self.chord_triggered = false;
+                self.b2_pressed_at = None;
+                self.b3_pressed_at = None;
+                self.b2_long_press_triggered = false;
+            }
+            return SdButtonAction::None;
+        }
+
+        // 3. Button 2 handling: short press = PrevFile, long press (>= 800ms) = StartRecording
+        let mut action = SdButtonAction::None;
+        if b2_down && !b3_down {
+            if self.b2_pressed_at.is_none() {
+                self.b2_pressed_at = Some(now);
+                self.b2_long_press_triggered = false;
+            }
+            if !self.b2_long_press_triggered {
+                if let Some(start) = self.b2_pressed_at {
+                    if now.saturating_duration_since(start) >= self.long_press_duration {
+                        self.b2_long_press_triggered = true;
+                        action = SdButtonAction::StartRecording;
+                    }
+                }
+            }
+        } else if !b2_down {
+            if let Some(start) = self.b2_pressed_at.take() {
+                if !self.b2_long_press_triggered {
+                    if now.saturating_duration_since(start) < self.long_press_duration {
+                        action = SdButtonAction::PrevFile;
+                    }
+                }
+                self.b2_long_press_triggered = false;
+            }
+        }
+
+        if action != SdButtonAction::None {
+            return action;
+        }
+
+        // 4. Button 3 handling: short press on release = NextFile
+        if b3_down && !b2_down {
+            if self.b3_pressed_at.is_none() {
+                self.b3_pressed_at = Some(now);
+            }
+        } else if !b3_down {
+            if let Some(_start) = self.b3_pressed_at.take() {
+                action = SdButtonAction::NextFile;
+            }
+        }
+
+        action
+    }
+}
+
 #[cfg(test)]
+#[allow(unused_imports)]
 mod tests {
+    use super::*;
 
     #[test]
     fn mode_button_cycles_through_status_live_and_sd() {
@@ -226,5 +380,63 @@ mod tests {
             controller.update_with_time(false, true, start + Duration::from_millis(1100)),
             ModeButtonAction::None
         );
+    }
+
+    #[test]
+    fn sd_button_navigation_short_presses() {
+        let mut ctrl = SdButtonController::new(Duration::from_millis(800), Duration::from_millis(1000));
+        let t0 = Instant::now();
+
+        // Button 3 tapped (Next)
+        assert_eq!(ctrl.update_with_time(false, true, false, t0), SdButtonAction::None);
+        assert_eq!(ctrl.update_with_time(false, false, false, t0 + Duration::from_millis(150)), SdButtonAction::NextFile);
+
+        // Button 2 tapped (Prev)
+        let t1 = t0 + Duration::from_millis(300);
+        assert_eq!(ctrl.update_with_time(true, false, false, t1), SdButtonAction::None);
+        assert_eq!(ctrl.update_with_time(false, false, false, t1 + Duration::from_millis(150)), SdButtonAction::PrevFile);
+    }
+
+    #[test]
+    fn sd_button_start_recording_on_long_press_b2() {
+        let mut ctrl = SdButtonController::new(Duration::from_millis(800), Duration::from_millis(1000));
+        let t0 = Instant::now();
+
+        // Hold B2 for 800ms
+        assert_eq!(ctrl.update_with_time(true, false, false, t0), SdButtonAction::None);
+        assert_eq!(ctrl.update_with_time(true, false, false, t0 + Duration::from_millis(500)), SdButtonAction::None);
+        assert_eq!(ctrl.update_with_time(true, false, false, t0 + Duration::from_millis(800)), SdButtonAction::StartRecording);
+
+        // Release B2 -> should NOT trigger PrevFile
+        assert_eq!(ctrl.update_with_time(false, false, false, t0 + Duration::from_millis(900)), SdButtonAction::None);
+    }
+
+    #[test]
+    fn sd_button_dual_chord_delete() {
+        let mut ctrl = SdButtonController::new(Duration::from_millis(800), Duration::from_millis(1000));
+        let t0 = Instant::now();
+
+        // Press both B2 and B3
+        assert_eq!(ctrl.update_with_time(true, true, false, t0), SdButtonAction::None);
+        assert_eq!(ctrl.update_with_time(true, true, false, t0 + Duration::from_millis(500)), SdButtonAction::None);
+        // Held for 1000ms -> DeleteSelectedFile
+        assert_eq!(ctrl.update_with_time(true, true, false, t0 + Duration::from_millis(1000)), SdButtonAction::DeleteSelectedFile);
+
+        // Release buttons -> should NOT trigger navigation or recording
+        assert_eq!(ctrl.update_with_time(true, false, false, t0 + Duration::from_millis(1100)), SdButtonAction::None);
+        assert_eq!(ctrl.update_with_time(false, false, false, t0 + Duration::from_millis(1200)), SdButtonAction::None);
+    }
+
+    #[test]
+    fn sd_button_actions_while_recording() {
+        let mut ctrl = SdButtonController::new(Duration::from_millis(800), Duration::from_millis(1000));
+        let t0 = Instant::now();
+
+        // While recording, pressing B2 stops recording
+        assert_eq!(ctrl.update_with_time(true, false, true, t0), SdButtonAction::StopRecording);
+        assert_eq!(ctrl.update_with_time(false, false, true, t0 + Duration::from_millis(50)), SdButtonAction::None);
+
+        // While recording, pressing B3 cancels recording
+        assert_eq!(ctrl.update_with_time(false, true, true, t0 + Duration::from_millis(100)), SdButtonAction::CancelRecording);
     }
 }

@@ -20,8 +20,10 @@ The original architecture also defines the workload split:
 
 **Goals:**
 - Provide a reliable live audio path from the microphone to a browser over Wi-Fi.
-- Record microphone audio locally in Ogg Opus format to an SD card.
-- Expose stored recordings through a browser-accessible playback path.
+- Synchronize system time with NTP internet time servers to provide accurate UTC wall-clock timestamps for audio file logging.
+- Record microphone audio locally in standard WAV format under `/audio/YYYYMMDD_HHMMSS.wav` on the SD card with robust start, stop, and cancel controls.
+- Provide on-device file navigation, playback, and safe two-button deletion in `SD_MODE`.
+- Expose stored recordings through a browser-accessible listing, native browser playback, and remote deletion path.
 - Keep the device self-contained and usable from a browser without external infrastructure.
 - Preserve the original hardware and dual-core constraints defined in the initial project specification.
 
@@ -36,10 +38,12 @@ The original architecture also defines the workload split:
 ### 1. Deliver the full project in a phased implementation order
 The project remains a full-feature audio streamer/logger, but it will be implemented in a practical sequence:
 1. Live audio streaming to browser
-2. SD-card recording in Ogg Opus
+2. SD-card recording in standard WAV format
 3. Playback of stored recordings to browser
 
 This keeps the product complete in scope while reducing risk and validating the critical audio path early.
+
+**Alternative considered:** build all three features in parallel. Rejected because the live streaming path is the highest-risk foundation and should be validated before storage and browser playback features are layered on.
 
 **Alternative considered:** build all three features in parallel. Rejected because the live streaming path is the highest-risk foundation and should be validated before storage and browser playback features are layered on.
 
@@ -77,15 +81,19 @@ The browser experience will be minimal but functional. The device may serve a ti
 
 **Alternative considered:** building a full-feature web application front end. Rejected because the core requirement is browser playback and device self-containment, not a polished app experience.
 
-### 3. Use Ogg Opus for offline recording
-The system will record audio as Ogg Opus files to the SD card, matching the project’s initial specification and the expected compact-storage requirement for long-form audio logging.
+### 3. Use standard 16 kHz 16-bit mono WAV for offline recording with UTC timestamped filenames
+The system will record audio as standard WAV files (RIFF format) to the SD card.
+- Recordings are created under the `/audio` directory on the FATFS-mounted SD card.
+- Files are named in the format `YYYYMMDD_HHMMSS.wav` using the UTC wall-clock time at the instant recording begins (obtained from the NTP-synchronized system clock).
+- Core 1 streams audio frames into the PSRAM ring buffer, while a recording worker on Core 0 pulls frames, writes linear 16-bit PCM samples into the WAV data chunk, and finalizes the 44-byte WAV header upon completion.
+- WAV recording avoids heavy codec memory allocations and stack bloat on FreeRTOS threads, ensuring robust, low-latency writes to the SD card without memory exhaustion or stack overflows.
 
-**Alternative considered:** PCM or WAV recording. Rejected because the project explicitly targets Ogg Opus for efficient storage and aligns with the original architecture decision.
+**Alternative considered:** Ogg Opus recording. Evaluated and rejected due to Pure-Rust `opus-rs` requiring stack allocations exceeding available FreeRTOS thread limits in internal SRAM on ESP32-S3, which causes stack overflows, MMU bus contention, and runtime crashes. Standard WAV format provides guaranteed hardware stability, low CPU consumption, and native browser compatibility (`audio/wav`).
 
 ### 4. Respect the original audio pipeline configuration
-The design will keep the capture configuration aligned with the initial spec: 16 kHz mono audio, 24-bit data packed into a 32-bit slot, converted into 16-bit PCM frames for streaming and compression, and Opus encoded in voice mode at roughly 16-24 kbps VBR.
+The design will keep the capture configuration aligned with the initial spec: 16 kHz mono audio, 24-bit data packed into a 32-bit slot, converted into 16-bit PCM frames for streaming and storage.
 
-**Alternative considered:** deviating from the original sample and encoding setup. Rejected because the project’s hardware and architecture assumptions depend on that configuration for stability and audio quality.
+**Alternative considered:** deviating from the original sample setup. Rejected because the project’s hardware and architecture assumptions depend on that configuration for stability and audio quality.
 
 ### 5. Keep Wi-Fi credentials outside source control
 The firmware will read credentials from a local, git-ignored file to avoid committing secrets while preserving a simple deployment model for local development and field use.
@@ -118,13 +126,59 @@ The Waveshare ESP32-S3-WROOM-1-N8R8 development board includes an addressable WS
 
 **Alternative considered:** using external crates like `ws2812-esp32-rmt-driver`. Rejected due to crate dependency conflicts with the patched `esp-idf-hal 0.47`; a lightweight RMT driver in `src/led.rs` using standard ESP-IDF RMT primitives keeps dependencies minimal and rock-solid.
 
+### 11. NTP System Time Synchronization Service
+To produce accurate, human-readable, and sortable filenames (`YYYYMMDD_HHMMSS.wav`) for recorded audio, the board's internal real-time clock (RTC) must be synchronized to UTC:
+- **Client Configuration:** The firmware utilizes the ESP-IDF SNTP service (`esp-idf-svc::sntp::EspSntp`) configured for public NTP pools (`pool.ntp.org`).
+- **Connection Trigger:** Once Wi-Fi is successfully connected, the NTP client is initialized and starts time synchronization asynchronously on Core 0.
+- **Timestamp Formatting:** When arming or starting a recording, the system reads current wall-clock UTC time (`time()`, `gmtime_r`) to format `YYYYMMDD_HHMMSS.wav`.
+- **Fault Tolerance & Fallback:** If Wi-Fi is disconnected or NTP synchronization times out, the system logs a warning and falls back to uptime-based or monotonic timestamps (e.g. `19700101_HHMMSS.wav`) rather than blocking device operation or crashing.
+- **Periodic Re-sync:** To prevent RTC drift across long sessions, the SNTP service continues operating periodically in the background (or re-syncs once daily at midnight UTC).
+- **Silent Background Operation:** Failures during background re-sync are logged to console and do not interrupt audio streaming, recording, or OLED display.
+
+**Alternative considered:** using an external battery-backed I2C RTC (e.g., DS3231). Rejected because it requires extra hardware components, wiring, and I2C address management, whereas the device already possesses Wi-Fi connectivity and can synchronize seamlessly over NTP.
+
+**Alternative considered:** blocking boot or recording until NTP succeeds. Rejected because the device must remain operational even in offline environments or during temporary network outages.
+
+### 12. Hardware & Web Recording Controls in SD_MODE
+Recording audio to the SD card requires clear state management and intuitive controls across both the physical board and the web interface:
+- **Prerequisite State:** The device must be in `SD_MODE` and the SD card must be mounted and writable.
+- **Physical Button 2 (GPIO 7) — Start/Stop:**
+  - In `SD_MODE` while idle: pressing Button 2 starts recording to `/audio/YYYYMMDD_HHMMSS.wav`. The OLED displays an active recording status (e.g., recording indicator and elapsed time).
+  - While recording is active: pressing Button 2 again stops recording. The recording worker flushes all pending frames, updates the 44-byte WAV header with the final chunk sizes, flushes the FATFS buffers, and finalizes the file.
+- **Physical Button 3 (GPIO 6) — Cancel & Discard:**
+  - While recording is active: pressing Button 3 immediately cancels the recording. Audio capture and writing for the file are aborted, the file is closed, and the incomplete file is deleted from `/audio`, preventing corrupt or partial recordings from cluttering the SD card.
+- **Web UI Recording Controls:**
+  - The device web interface exposes controls to start and stop recordings remotely (`POST /api/recording/start` and `POST /api/recording/stop`), sharing the same recording state machine as physical button interactions.
+
+**Alternative considered:** keeping cancelled recordings marked as `.partial`. Rejected because incomplete files waste limited SD storage and require manual cleanup by the user.
+
+### 13. Stored Recording Browsing, Browser Playback, and Deletion
+Users need to inspect, play back, and manage recorded files both on the physical device and via the web browser:
+- **On-Device Browsing (SD_MODE):**
+  - When not recording, the `SD_MODE` OLED screen displays the list of files found in `/audio`, ordered in reverse chronological order (newest recordings first).
+  - Button 2 (GPIO 7) navigates among existing recordings.
+  - Button 3 (GPIO 6) skips to the next recording in the list.
+- **On-Device Playback:**
+  - Pressing Button 2 on the currently selected recording initiates audio playback, and pressing Button 2 again stops playback.
+- **On-Device Safe Deletion:**
+  - To prevent accidental deletion on the board, deleting the currently selected recording requires a simultaneous long press of Button 2 and Button 3 (chorded long press). Upon detection, the file is unlinked from the SD card and the OLED file list updates immediately.
+- **Web Interface File Management & Direct Playback:**
+  - `GET /api/recordings`: Returns a JSON list of existing files in `/audio` including filename, size, and date/time.
+  - `GET /recordings/{filename}`: Serves the `.wav` file with `Content-Type: audio/wav`, allowing native audio playback directly inside standard browser `<audio>` elements without third-party plugins.
+  - `DELETE /api/recordings/{filename}`: Deletes the specified recording from the SD card.
+
+**Alternative considered:** single-button long press for on-device deletion. Rejected because holding a single navigation button can easily be triggered accidentally; requiring both Button 2 and Button 3 to be held simultaneously provides an intentional, safe confirmation chord.
+
 ## Risks / Trade-offs
 
 - [Audio buffer pressure under SD write stalls] → Use PSRAM-backed buffers and a dual-core split so the real-time capture path remains stable while recording or network activity happens.
 - [Browser compatibility across stream formats] → Prefer a simple browser-compatible endpoint and keep the stream payload standardized, with minimal fallback logic where needed.
 - [Limited memory and CPU availability] → Keep the browser-serving layer minimal and focus the firmware on the critical live path first.
-- [Potential file-system and recording issues] → Validate SD card write reliability during recording and finalize files cleanly when stopped.
+- [Potential file-system and recording issues] → Validate SD card write reliability during recording and finalize files cleanly when stopped. Cancelled recordings are immediately deleted to avoid orphaned fragments.
 - [GPIO wiring errors] → Follow the fixed mapping exactly and avoid the reserved PSRAM pins to prevent device instability or crashes.
+- [NTP sync latency or network failure] → Initialize NTP asynchronously on Core 0; if Wi-Fi or NTP is unavailable, log a warning and fall back to monotonic uptime timestamps without blocking device operation.
+- [Accidental file deletion on hardware] → Require a simultaneous two-button long press (Button 2 + Button 3) so single button presses cannot delete recordings.
+- [Concurrent SD card access] → Synchronize FATFS operations with a mutex so recording writes, web file downloads, and deletions do not corrupt the filesystem.
 
 ## Migration Plan
 
@@ -132,5 +186,5 @@ No migration is required for this initial project version. The change introduces
 
 ## Open Questions
 
-- SD_MODE file navigation, playback controls, and deletion are intentionally deferred from the initial mode-system phase. Their interaction design will be defined when the recording and playback tasks are undertaken in phases 4 and 5.
 - The exact OLED layout for STATUS_MODE sensor readings may require iteration once real I2S and PIR data is available on the hardware, given the 128x32 pixel constraint.
+

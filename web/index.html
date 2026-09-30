@@ -15,7 +15,7 @@ body {
   background-color: #0d1117;
   color: #c9d1d9;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
   align-items: center;
   min-height: 100vh;
   padding: 1rem;
@@ -177,13 +177,68 @@ audio {
   color: #58a6ff;
   min-height: 1em;
 }
+.file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.75rem;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  gap: 0.5rem;
+}
+.file-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.file-name {
+  color: #e6edf3;
+  font-family: monospace;
+  font-size: 0.8rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-meta {
+  color: #8b949e;
+  font-size: 0.7rem;
+}
+.file-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+.btn-sm {
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  border-radius: 4px;
+}
+.btn-play {
+  background: #238636;
+}
+.btn-play:hover {
+  background: #2ea043;
+}
+.btn-del {
+  background: #21262d;
+  color: #f85149;
+  border: 1px solid #30363d;
+}
+.btn-del:hover {
+  background: #da3633;
+  color: #ffffff;
+}
 </style>
 </head>
 <body>
 <div class="card">
   <div class="header">
     <h1>Audio Node</h1>
-    <div class="badge"><span class="pulse"></span> LIVE</div>
+    <div style="display: flex; gap: 0.5rem; align-items: center;">
+      <button onclick="refreshStatus()" class="btn-sm" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; cursor: pointer;">↻ Refresh</button>
+      <div class="badge"><span class="pulse"></span> LIVE</div>
+    </div>
   </div>
   <div class="info-grid">
     <div class="info-box">
@@ -223,6 +278,39 @@ audio {
     </div>
   </div>
   <a class="direct-link" id="directLink" href="#" target="_blank">Direct Stream Link: :8080/stream.wav</a>
+</div>
+
+<div class="card" style="margin-top: 1.5rem;">
+  <div class="header">
+    <h1>SD Card Recordings</h1>
+    <span class="badge" id="recBadge" style="display:none; background: rgba(218, 54, 51, 0.2); color: #f85149; border-color: #da3633;">
+      <span class="pulse" style="background: #f85149; box-shadow: 0 0 8px #f85149;"></span>
+      REC <span id="recTimer">00:00</span>
+    </span>
+  </div>
+
+  <div class="rec-controls" style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+    <button id="startRecBtn" onclick="startRecording()" style="background: #da3633; flex: 1;">● Record</button>
+    <button id="stopRecBtn" onclick="stopRecording()" style="background: #238636; flex: 1; display: none;">■ Stop</button>
+    <button id="cancelRecBtn" onclick="cancelRecording()" style="background: #21262d; border: 1px solid #30363d; flex: 1; display: none;">✕ Cancel</button>
+  </div>
+
+  <div id="recStatus" style="font-size: 0.8rem; color: #8b949e; margin-bottom: 1rem; min-height: 1.2rem;"></div>
+
+  <!-- Audio playback container -->
+  <div id="playbackContainer" style="display: none; margin-bottom: 1rem; padding: 0.75rem; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;">
+    <div style="font-size: 0.75rem; color: #58a6ff; margin-bottom: 4px;" id="playbackTitle">Now Playing:</div>
+    <audio id="recordingPlayer" controls style="width: 100%; height: 36px;"></audio>
+  </div>
+
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+    <span style="font-size: 0.85rem; font-weight: 600; color: #f0f6fc;">Recorded Files</span>
+    <button onclick="refreshStatus()" class="btn-sm" style="background: transparent; border: 1px solid #30363d; color: #8b949e; cursor: pointer;">↻ Refresh</button>
+  </div>
+
+  <div id="recordingsList" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 240px; overflow-y: auto;">
+    <div style="text-align: center; color: #8b949e; font-size: 0.8rem; padding: 1rem;">Loading recordings...</div>
+  </div>
 </div>
 
 <script>
@@ -394,8 +482,205 @@ fetch('/status')
         gainStatus.textContent = `Potentiometer: ${data.gain_percent}%`;
       }
     }
+    updateRecordingStatus(data);
   })
   .catch(() => {});
+
+// ── SD Card Recording Controls ──────────────────────────────────────────────
+const startRecBtn   = document.getElementById('startRecBtn');
+const stopRecBtn    = document.getElementById('stopRecBtn');
+const cancelRecBtn  = document.getElementById('cancelRecBtn');
+const recBadge      = document.getElementById('recBadge');
+const recTimer      = document.getElementById('recTimer');
+const recStatus     = document.getElementById('recStatus');
+const recList       = document.getElementById('recordingsList');
+const playContainer = document.getElementById('playbackContainer');
+const playTitle     = document.getElementById('playbackTitle');
+const playAudio     = document.getElementById('recordingPlayer');
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatDuration(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+function updateRecordingStatus(data) {
+  if (!data) return;
+  if (data.recording) {
+    recBadge.style.display = 'inline-flex';
+    recTimer.textContent = formatDuration(data.recording_duration || 0);
+    startRecBtn.style.display = 'none';
+    stopRecBtn.style.display = 'inline-block';
+    cancelRecBtn.style.display = 'inline-block';
+    recStatus.textContent = `Recording to: ${data.recording_filename} (${data.recording_frames || 0} frames)`;
+    recStatus.style.color = '#f85149';
+  } else {
+    recBadge.style.display = 'none';
+    startRecBtn.style.display = 'inline-block';
+    stopRecBtn.style.display = 'none';
+    cancelRecBtn.style.display = 'none';
+    if (recStatus.textContent.startsWith('Recording to:')) {
+      recStatus.textContent = 'Idle';
+      recStatus.style.color = '#8b949e';
+    }
+  }
+}
+
+function fetchRecordings() {
+  fetch('/api/recordings')
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'ok' && Array.isArray(data.recordings)) {
+        if (data.recordings.length === 0) {
+          recList.innerHTML = '<div style="text-align: center; color: #8b949e; font-size: 0.8rem; padding: 1rem;">No recordings found on SD card</div>';
+          return;
+        }
+        recList.innerHTML = data.recordings.map(f => `
+          <div class="file-item">
+            <div class="file-info">
+              <span class="file-name" title="${f.filename}">${f.filename}</span>
+              <span class="file-meta">${formatBytes(f.size)}</span>
+            </div>
+            <div class="file-actions">
+              <button class="btn-sm btn-play" onclick="playRecording('${f.filename}')">▶ Play</button>
+              <button class="btn-sm btn-del" onclick="deleteRecording('${f.filename}')">✕</button>
+            </div>
+          </div>
+        `).join('');
+      } else {
+        recList.innerHTML = '<div style="text-align: center; color: #f85149; font-size: 0.8rem; padding: 1rem;">Failed to load recordings</div>';
+      }
+    })
+    .catch(err => {
+      console.error("fetchRecordings error:", err);
+      recList.innerHTML = '<div style="text-align: center; color: #f85149; font-size: 0.8rem; padding: 1rem;">Error reading SD recordings</div>';
+    });
+}
+
+function startRecording() {
+  recStatus.textContent = 'Starting recording…';
+  recStatus.style.color = '#58a6ff';
+  fetch('/api/recording/start', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'ok') {
+        recStatus.textContent = `Recording started: ${data.filename}`;
+        pollStatus();
+      } else {
+        recStatus.textContent = `Start error: ${data.message || 'unknown'}`;
+        recStatus.style.color = '#f85149';
+      }
+    })
+    .catch(err => {
+      recStatus.textContent = 'Failed to send start command';
+      recStatus.style.color = '#f85149';
+    });
+}
+
+function stopRecording() {
+  recStatus.textContent = 'Finalizing and saving recording…';
+  recStatus.style.color = '#58a6ff';
+  fetch('/api/recording/stop', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'ok') {
+        recStatus.textContent = `Saved: ${data.filename}`;
+        recStatus.style.color = '#3fb950';
+        fetchRecordings();
+        pollStatus();
+      } else {
+        recStatus.textContent = `Stop error: ${data.message || 'unknown'}`;
+        recStatus.style.color = '#f85149';
+      }
+    })
+    .catch(err => {
+      recStatus.textContent = 'Failed to send stop command';
+      recStatus.style.color = '#f85149';
+    });
+}
+
+function cancelRecording() {
+  if (!confirm('Cancel recording and discard file?')) return;
+  recStatus.textContent = 'Cancelling recording…';
+  recStatus.style.color = '#f85149';
+  fetch('/api/recording/cancel', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      recStatus.textContent = 'Recording cancelled and discarded';
+      fetchRecordings();
+      pollStatus();
+    })
+    .catch(err => {
+      recStatus.textContent = 'Failed to send cancel command';
+    });
+}
+
+function playRecording(filename) {
+  playTitle.textContent = `Now Playing: ${filename}`;
+  playAudio.src = `/recordings/${filename}`;
+  playContainer.style.display = 'block';
+  playAudio.play().catch(e => console.error("Play error:", e));
+}
+
+function deleteRecording(filename) {
+  if (!confirm(`Delete recording "${filename}"?`)) return;
+  fetch(`/api/recordings?filename=${encodeURIComponent(filename)}`, { method: 'DELETE' })
+    .then(r => r.json())
+    .then(data => {
+      if (data.status === 'ok') {
+        if (playAudio.src.includes(filename)) {
+          playAudio.pause();
+          playContainer.style.display = 'none';
+        }
+        fetchRecordings();
+      } else {
+        alert('Delete failed: ' + (data.message || 'unknown error'));
+      }
+    })
+    .catch(err => alert('Failed to send delete request'));
+}
+
+function refreshStatus() {
+  fetch('/status')
+    .then(r => r.json())
+    .then(data => {
+      if (data.gain_override_active !== undefined) {
+        if (data.gain_override_active) {
+          gainCheck.checked = true;
+          gainSlider.disabled = false;
+          gainSlider.value = data.gain_override_percent;
+          gainPct.textContent = data.gain_override_percent + '%';
+          gainStatus.textContent = `Override active: ${data.gain_override_percent}%`;
+        } else {
+          gainCheck.checked = false;
+          gainSlider.disabled = true;
+          if (data.gain_percent !== undefined) {
+            gainSlider.value = data.gain_percent;
+            gainPct.textContent = data.gain_percent + '%';
+            gainStatus.textContent = `Potentiometer: ${data.gain_percent}%`;
+          }
+        }
+      }
+      updateRecordingStatus(data);
+    })
+    .catch(() => {});
+  fetchRecordings();
+}
+
+function pollStatus() {
+  refreshStatus();
+}
+
+// Initial fetch on page load only (no periodic polling to save energy)
+refreshStatus();
 </script>
 </body>
 </html>

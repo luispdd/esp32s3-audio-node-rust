@@ -254,12 +254,21 @@ where
     D: DrawTarget<Color = BinaryColor>,
     D::Error: core::fmt::Debug,
 {
-    let (header, line1, line2) = match &status.sd_card {
-        SdCardStatus::Unavailable(_) => (
-            DeviceMode::Sd.as_str().to_string(),
-            "SD unavailable".to_string(),
-            "Card not mounted".to_string(),
-        ),
+    let (header, line1, line2) = if let Some(ref rec) = status.recording {
+        let mins = rec.duration_secs / 60;
+        let secs = rec.duration_secs % 60;
+        (
+            format!("{} [REC]", DeviceMode::Sd.as_str()),
+            format!("{:02}:{:02} ({}f)", mins, secs, rec.frames_recorded),
+            truncate_display_line(&rec.filename, 20),
+        )
+    } else {
+        match &status.sd_card {
+            SdCardStatus::Unavailable(_) => (
+                DeviceMode::Sd.as_str().to_string(),
+                "SD unavailable".to_string(),
+                "Card not mounted".to_string(),
+            ),
         SdCardStatus::FolderCreateFailed(err) => (
             DeviceMode::Sd.as_str().to_string(),
             "/audio create fail".to_string(),
@@ -276,18 +285,30 @@ where
             "No files found".to_string(),
         ),
         SdCardStatus::Files(files) => {
-            let header = format!("{} ({})", DeviceMode::Sd.as_str(), files.len());
-            let line1 = files
-                .first()
-                .map(|f| truncate_display_line(f, 20))
-                .unwrap_or_default();
-            let line2 = if files.len() > 1 {
-                truncate_display_line(&files[1], 20)
+            if files.is_empty() {
+                (
+                    format!("{} (0)", DeviceMode::Sd.as_str()),
+                    "/audio empty".to_string(),
+                    "No files found".to_string(),
+                )
             } else {
-                "(end of list)".to_string()
-            };
-            (header, line1, line2)
+                let count = files.len();
+                let selected = status.selected_file_index.min(count.saturating_sub(1));
+                let header = format!("{} ({}/{})", DeviceMode::Sd.as_str(), selected + 1, count);
+                let line1 = format!("*{}", files[selected]);
+                let line2 = if selected + 1 < count {
+                    format!(" {}", files[selected + 1])
+                } else {
+                    " (end of list)".to_string()
+                };
+                (
+                    header,
+                    truncate_display_line(&line1, 21),
+                    truncate_display_line(&line2, 21),
+                )
+            }
         }
+    }
     };
 
     Text::with_baseline(
@@ -414,7 +435,7 @@ mod tests {
         // 4. Single file
         let status_single = SystemStatus::from_runtime_with_sd(
             true,
-            SdCardStatus::Files(vec!["rec001.opus".to_string()]),
+            SdCardStatus::Files(vec!["rec001.wav".to_string()]),
         );
         assert!(render_sd_screen(&mut display, &status_single, style).is_ok());
 
@@ -422,9 +443,9 @@ mod tests {
         let status_multi = SystemStatus::from_runtime_with_sd(
             true,
             SdCardStatus::Files(vec![
-                "rec_very_long_file_name_2026.opus".to_string(),
-                "rec002.opus".to_string(),
-                "rec003.opus".to_string(),
+                "rec_very_long_file_name_2026.wav".to_string(),
+                "rec002.wav".to_string(),
+                "rec003.wav".to_string(),
             ]),
         );
         assert!(render_sd_screen(&mut display, &status_multi, style).is_ok());
@@ -432,9 +453,9 @@ mod tests {
 
     #[test]
     fn truncates_long_display_lines() {
-        assert_eq!(truncate_display_line("short.opus", 20), "short.opus");
+        assert_eq!(truncate_display_line("short.wav", 20), "short.wav");
         assert_eq!(
-            truncate_display_line("this_is_a_very_long_file_name.opus", 20),
+            truncate_display_line("this_is_a_very_long_file_name.wav", 20),
             "this_is_a_very_lo..."
         );
     }

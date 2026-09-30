@@ -1,6 +1,6 @@
 ## Purpose
 
-This capability defines the browser-accessible audio pipeline for the ESP32-S3 device: live streaming first, then local Ogg Opus recording to SD, and finally playback of stored audio back to the browser without requiring external resources.
+This capability defines the browser-accessible audio pipeline for the ESP32-S3 device: live streaming first, then local standard WAV recording to SD, and finally playback of stored audio back to the browser without requiring external resources.
 
 The implementation SHALL honor the hardware baseline defined in the project specification: a Waveshare ESP32-S3-WROOM-1-N8R8 using the mapped GPIO assignments for the INMP441 microphone, SD card, OLED, PIR, ADC, and buttons, with reserved GPIO 33-37 left unused.
 
@@ -28,16 +28,16 @@ The system SHALL capture microphone audio on the ESP32-S3 and make it available 
 - **WHEN** the Wi-Fi stack is not connected or the stream endpoint is not initialized
 - **THEN** the system SHALL report an error state or remain in a non-streaming mode without crashing the device
 
-### Requirement: Device records live audio to SD card in Ogg Opus format
-The system SHALL record captured audio to the MicroSD card as Ogg Opus files while the device is operating in recording mode.
+### Requirement: Device records live audio to SD card in standard WAV format
+The system SHALL record captured audio to the MicroSD card as standard WAV files while the device is operating in recording mode.
 
 #### Scenario: Recording begins
 - **WHEN** the user starts recording
-- **THEN** the system SHALL create an Ogg Opus output file on the MicroSD card and write audio frames continuously until recording stops
+- **THEN** the system SHALL create a standard WAV output file on the MicroSD card and write audio frames continuously until recording stops
 
 #### Scenario: Recording stops
 - **WHEN** the user stops recording or the device is commanded to stop
-- **THEN** the system SHALL finalize the file and make it available for later playback
+- **THEN** the system SHALL finalize the WAV header and make the file available for later playback
 
 ### Requirement: Device serves stored recordings to browser playback
 The system SHALL allow a browser client to access stored audio files from the device and play them back without requiring external dependencies or a separate server application.
@@ -120,5 +120,61 @@ The system SHALL control the onboard WS2812 RGB LED (GPIO 38) to display blue du
 #### Scenario: Initialization finishes
 - **WHEN** all hardware and network initialization completes and the main application loop begins
 - **THEN** the system SHALL turn off the onboard RGB LED
+
+### Requirement: Device synchronizes clock via NTP for timestamped recording
+The system SHALL synchronize the internal real-time clock from an internet NTP service once connected to Wi-Fi to provide accurate UTC wall-clock timestamps for naming audio recordings in `/audio/YYYYMMDD_HHMMSS.wav`.
+
+#### Scenario: Successful NTP synchronization
+- **WHEN** the device connects to Wi-Fi and requests NTP synchronization
+- **THEN** the system SHALL set the system RTC to UTC wall time and format subsequent recording filenames as `YYYYMMDD_HHMMSS.wav` based on the start timestamp
+
+#### Scenario: NTP synchronization fails or times out
+- **WHEN** Wi-Fi is disconnected or the NTP server does not respond within the timeout
+- **THEN** the system SHALL log a warning and fall back to monotonic or internal timestamps without blocking device operation or crashing
+
+#### Scenario: Periodic background re-sync
+- **WHEN** the device remains connected over extended operation
+- **THEN** the system SHALL periodically re-synchronize time in the background without interrupting streaming, recording, or display rendering
+
+### Requirement: SD_MODE controls manage recording lifecycle
+The system SHALL control recording via physical buttons and web controls when the device is in SD_MODE, creating WAV files under `/audio/YYYYMMDD_HHMMSS.wav` and allowing clean finalization or cancellation.
+
+#### Scenario: Starting a recording
+- **WHEN** the device is in SD_MODE and Button 2 (GPIO 7) is pressed (or web start is triggered)
+- **THEN** the system SHALL start audio capture and writing to `/audio/YYYYMMDD_HHMMSS.wav`
+
+#### Scenario: Stopping and finalizing a recording
+- **WHEN** recording is in progress and Button 2 (GPIO 7) is pressed again (or web stop is triggered)
+- **THEN** the system SHALL finalize the WAV header, flush SD buffers, and save the file
+
+#### Scenario: Cancelling an in-progress recording
+- **WHEN** recording is in progress and Button 3 (GPIO 6) is pressed
+- **THEN** the system SHALL abort recording, close the file, and delete the partial recording from the SD card
+
+### Requirement: SD_MODE supports on-device browsing, playback, and deletion
+The system SHALL allow navigating, playing back, and deleting stored recordings directly on the device using Buttons 2 and 3 in SD_MODE.
+
+#### Scenario: Browsing recordings in reverse chronological order
+- **WHEN** the device is in SD_MODE and not recording
+- **THEN** the system SHALL list recordings from `/audio` in reverse chronological order, allowing Button 2 to navigate files and Button 3 to skip to the next recording
+
+#### Scenario: Initiating on-device playback
+- **WHEN** a recording is selected in SD_MODE and Button 2 is pressed
+- **THEN** the system SHALL start playing the recording, and stop playback if Button 2 is pressed again
+
+#### Scenario: Deleting a recording with dual-button chord
+- **WHEN** a recording is selected in SD_MODE and Button 2 and Button 3 are pressed and held simultaneously
+- **THEN** the system SHALL delete the selected file from the SD card and update the displayed file list
+
+### Requirement: Web interface manages stored recordings
+The system SHALL expose web endpoints to list stored recordings, stream playback natively, and delete recordings remotely.
+
+#### Scenario: Web listing and playback
+- **WHEN** a browser client requests the list of recordings or streams a specific `.wav` file
+- **THEN** the device SHALL return the file metadata list and stream the audio payload with `audio/wav` MIME headers for native browser playback
+
+#### Scenario: Remote recording deletion
+- **WHEN** a browser client issues a deletion request for a stored recording
+- **THEN** the device SHALL remove the file from the SD card and confirm deletion
 
 

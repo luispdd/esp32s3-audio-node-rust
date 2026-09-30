@@ -7,7 +7,7 @@ This proposal follows the hardware baseline defined in the project’s initial s
 ## What Changes
 
 - Add a live audio streaming path from the microphone to a browser over Wi-Fi using the board’s existing audio capture and network stack.
-- Add SD-card recording using Ogg Opus so audio can be stored locally on the device while preserving the original architecture split across the two ESP32-S3 cores.
+- Add SD-card recording using standard 16 kHz 16-bit mono WAV format so audio can be stored locally on the device while preserving the original architecture split across the two ESP32-S3 cores without memory or stack contention.
 - Add browser playback for recorded audio files, including a minimal device-hosted page or stream endpoint when needed.
 - Keep the final product scope full-featured while delivering it in a practical sequence: live stream first, then SD-card recording, then playback from stored files.
 - Store Wi-Fi credentials in a local, git-ignored config file so source code remains portable and safe.
@@ -16,11 +16,16 @@ This proposal follows the hardware baseline defined in the project’s initial s
 - Extract screen management into `src/display.rs` and SD card management into `src/sd.rs` to maintain a clean, extensible module boundary as the codebase grows.
 - Add web-based gain override controls to the browser live stream player (a checkbox to enable override and a slider to set 0–100% gain) so listeners can adjust audio level remotely without touching the physical board, persisting in memory until unchecked or board restart.
 - Control the onboard WS2812 RGB LED on GPIO 38: illuminate blue during hardware and network initialization, then turn off completely once the boot process finishes.
+- Synchronize system time via an NTP client upon establishing Wi-Fi connection, ensuring accurate UTC timestamps for audio logs and file naming, with periodic background synchronization to minimize RTC drift.
+- Record audio to MicroSD in WAV format under `/audio/YYYYMMDD_HHMMSS.wav` using the UTC start timestamp.
+- Implement hardware recording controls in `SD_MODE`: Button 2 (GPIO 7) starts recording and stops/finalizes when pressed again; Button 3 (GPIO 6) cancels recording in progress and discards the file.
+- Implement onboard recording browsing and playback in `SD_MODE`: Button 2 (GPIO 7) navigates existing files in reverse chronological order, Button 3 (GPIO 6) skips to the next recording, pressing Button 2 starts or stops playback of the selected file, and a simultaneous long press on Button 2 + Button 3 deletes the selected file.
+- Provide web interface management for stored recordings: list recordings, play them back natively in the browser without external services, start/stop recording remotely, and delete recordings from the web UI.
 
 ## Capabilities
 
 ### New Capabilities
-- `audio-streaming`: the ESP32-S3 device captures audio, exposes it to the browser with real-time gain control (physical potentiometer and browser override), records it to SD card, and replays stored recordings through a browser without requiring external services.
+- `audio-streaming`: the ESP32-S3 device captures audio, exposes it to the browser with real-time gain control (physical potentiometer and browser override), syncs system time via NTP, records timestamped WAV files to SD card with physical/web controls, and provides onboard/browser navigation, playback, and file deletion without requiring external services.
 - `device-mode-system`: a button-driven, OLED-displayed mode switching layer (STATUS_MODE, LIVE_MODE, SD_MODE) that provides a verifiable interactive foundation before the full audio pipeline is activated.
 
 ### Modified Capabilities
@@ -28,8 +33,8 @@ This proposal follows the hardware baseline defined in the project’s initial s
 
 ## Impact
 
-- Firmware: ESP32-S3 real-time audio capture, dual-core workload separation, Wi-Fi networking, Ogg Opus encoding, SD card operations, and browser-serving endpoints.
-- Hardware integration: microphone, SD card, OLED status display, PIR input, ADC adjustment channel, and button-driven control flow using the original GPIO map.
-- Browser interaction: direct playback of live streams and stored files from the device, with minimal serving logic when a lightweight page is required.
+- Firmware: ESP32-S3 real-time audio capture, dual-core workload separation, Wi-Fi networking, SNTP time synchronization, WAV file writing, SD card FATFS operations (recording, directory listing, deletion), and browser-serving REST and audio endpoints.
+- Hardware integration: microphone, SD card, OLED status display, PIR input, ADC adjustment channel, and multi-button control state machine (Buttons 1, 2, and 3 with short, long, and simultaneous chord combinations) using the original GPIO map.
+- Browser interaction: direct playback of live streams and stored files from the device, gain override controls, recording trigger controls, and file management via a lightweight, self-contained web page.
 - Configuration: a local Wi-Fi credentials file kept out of version control.
 - System constraints: the implementation must respect the board’s PSRAM memory model and avoid reserved GPIO blocks to prevent bus corruption and crashes.

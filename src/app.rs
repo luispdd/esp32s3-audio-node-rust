@@ -8,7 +8,7 @@ use esp_idf_svc::hal::units::*;
 
 use crate::config::Config;
 use crate::display::OledDisplay;
-use crate::modes::{DeviceMode, ModeButtonAction, ModeButtonController};
+use crate::modes::{DeviceMode, ModeButtonAction, ModeButtonController, SdButtonAction, SdButtonController};
 use crate::network::{wifi_credentials, WifiConnection};
 use crate::sd::{SdCard, SdCardStatus};
 use crate::status::SystemStatus;
@@ -77,6 +77,17 @@ impl App {
             log::error!("WiFi connection failed: {}", error);
             error
         })?;
+
+        let ntp_client = match crate::time::NtpClient::init() {
+            Ok(ntp) => {
+                log::info!("NTP client started; synchronizing system time in background via pool.ntp.org");
+                Some(ntp)
+            }
+            Err(err) => {
+                log::warn!("NTP client initialization failed: {err}");
+                None
+            }
+        };
 
         let i2c = I2cDriver::new(
             i2c0,
@@ -209,8 +220,14 @@ impl App {
             None
         };
 
-        // Start live audio HTTP server on Core 0
-        let _http_server = crate::audio::LiveAudioStream::start_server(audio_buffer.clone(), 80);
+        let recording_controller = crate::audio::RecordingController::new();
+
+        // Start live audio and recording HTTP server on Core 0
+        let _http_server = crate::audio::LiveAudioStream::start_server(
+            audio_buffer.clone(),
+            recording_controller.clone(),
+            80,
+        );
         match &_http_server {
             Ok(_) => {
                 log::info!(
@@ -229,14 +246,20 @@ impl App {
 
         let mode_button = PinDriver::input(pins.gpio5, Pull::Up)
             .map_err(|err| format!("failed to configure mode button on GPIO 5: {err}"))?;
-        let record_button = PinDriver::input(pins.gpio6, Pull::Up)
-            .map_err(|err| format!("failed to configure record button on GPIO 6: {err}"))?;
-        let other_button = PinDriver::input(pins.gpio7, Pull::Up)
-            .map_err(|err| format!("failed to configure other button on GPIO 7: {err}"))?;
+        // Button 2 (Record) on GPIO 7 and Button 3 (Other/Cancel) on GPIO 6 matching physical hardware wiring
+        let record_button = PinDriver::input(pins.gpio7, Pull::Up)
+            .map_err(|err| format!("failed to configure record button on GPIO 7: {err}"))?;
+        let other_button = PinDriver::input(pins.gpio6, Pull::Up)
+            .map_err(|err| format!("failed to configure other button on GPIO 6: {err}"))?;
 
         let mut current_mode = DeviceMode::Status;
         let mut button_controller =
             ModeButtonController::new(ModeButtonController::DEFAULT_LONG_PRESS_DURATION);
+        let mut sd_button_controller = SdButtonController::new(
+            SdButtonController::DEFAULT_LONG_PRESS_DURATION,
+            SdButtonController::DEFAULT_CHORD_DURATION,
+        );
+        let mut selected_file_index: usize = 0;
 
         let mut button2_was_pressed = false;
         let mut button3_was_pressed = false;
@@ -263,8 +286,8 @@ impl App {
             DeviceMode::Sd.as_str()
         );
         log::info!("Mode button is active-low and configured on GPIO 5 with internal pull-up enabled.");
-        log::info!("Record button (Button 2) configured on GPIO 6 with internal pull-up enabled.");
-        log::info!("Other button (Button 3) configured on GPIO 7 with internal pull-up enabled.");
+        log::info!("Record button (Button 2) configured on GPIO 7 with internal pull-up enabled.");
+        log::info!("Other button (Button 3) configured on GPIO 6 with internal pull-up enabled.");
         log::info!("PIR sensor input configured on GPIO 3 with pull-down enabled.");
         log::info!("Potentiometer configured on GPIO 4 (ADC1_CH3) controlling microphone gain in real time.");
 
@@ -274,7 +297,19 @@ impl App {
             let _ = led.turn_off();
         }
 
+        let mut ntp_synced_logged = false;
+
         loop {
+            if !ntp_synced_logged {
+                if let Some(ref ntp) = ntp_client {
+                    if ntp.is_synchronized() {
+                        let now = crate::time::UtcDateTime::now();
+                        log::info!("NTP synchronization complete! Current UTC time: {}", now.format_iso());
+                        ntp_synced_logged = true;
+                    }
+                }
+            }
+
             let pressed = mode_button.is_low();
             match button_controller.update(pressed, display.is_on()) {
                 ModeButtonAction::CycleMode => {
@@ -297,17 +332,110 @@ impl App {
                 ModeButtonAction::None => {}
             }
 
-            let b2_pressed = record_button.is_low();
-            if b2_pressed && !button2_was_pressed {
-                log::info!("Button 2 (GPIO 6) pressed: Record button triggered");
-            }
-            button2_was_pressed = b2_pressed;
+            let b2_down = record_button.is_low();
+            let b3_down = other_button.is_low();
 
-            let b3_pressed = other_button.is_low();
-            if b3_pressed && !button3_was_pressed {
-                log::info!("Button 3 (GPIO 7) pressed: Other button triggered");
+            if current_mode == DeviceMode::Sd {
+                let is_rec = recording_controller.is_recording();
+                match sd_button_controller.update(b2_down, b3_down, is_rec) {
+                    SdButtonAction::NextFile => {
+                        let files = crate::sd::list_audio_files();
+                        if !files.is_empty() {
+                            selected_file_index = (selected_file_index + 1) % files.len();
+                            log::info!(
+                                "Selected recording [{}/{}]: {}",
+                                selected_file_index + 1,
+                                files.len(),
+                                files[selected_file_index]
+                            );
+                        }
+                    }
+                    SdButtonAction::PrevFile => {
+                        let files = crate::sd::list_audio_files();
+                        if !files.is_empty() {
+                            selected_file_index = (selected_file_index + files.len() - 1) % files.len();
+                            log::info!(
+                                "Selected recording [{}/{}]: {}",
+                                selected_file_index + 1,
+                                files.len(),
+                                files[selected_file_index]
+                            );
+                        } else {
+                            let audio_dir = crate::sd::get_audio_dir();
+                            match recording_controller.start(audio_dir, audio_buffer.clone()) {
+                                Ok(info) => log::info!("Started recording to {}", info.filename),
+                                Err(err) => log::warn!("Failed to start recording: {err}"),
+                            }
+                        }
+                    }
+                    SdButtonAction::StartRecording => {
+                        let audio_dir = crate::sd::get_audio_dir();
+                        match recording_controller.start(audio_dir, audio_buffer.clone()) {
+                            Ok(info) => {
+                                log::info!("Started recording to {} via Button 2 long-press", info.filename);
+                            }
+                            Err(err) => {
+                                log::warn!("Failed to start recording: {err}");
+                            }
+                        }
+                    }
+                    SdButtonAction::StopRecording => {
+                        match recording_controller.stop() {
+                            Ok(filename) => {
+                                log::info!("Recording stopped and saved: {filename}");
+                                selected_file_index = 0;
+                            }
+                            Err(err) => {
+                                log::warn!("Failed to stop recording: {err}");
+                            }
+                        }
+                    }
+                    SdButtonAction::CancelRecording => {
+                        match recording_controller.cancel() {
+                            Ok(()) => {
+                                log::info!("Recording cancelled and discarded");
+                            }
+                            Err(err) => {
+                                log::warn!("Failed to cancel recording: {err}");
+                            }
+                        }
+                    }
+                    SdButtonAction::DeleteSelectedFile => {
+                        let audio_dir = crate::sd::get_audio_dir();
+                        let files = crate::sd::list_audio_files();
+                        if !files.is_empty() && selected_file_index < files.len() {
+                            let file_to_delete = &files[selected_file_index];
+                            let path = format!("{audio_dir}/{file_to_delete}");
+                            match std::fs::remove_file(&path) {
+                                Ok(_) => {
+                                    log::info!(
+                                        "Deleted selected recording: {file_to_delete} via dual-button chord (B2+B3)"
+                                    );
+                                    let new_len = files.len() - 1;
+                                    if selected_file_index >= new_len && new_len > 0 {
+                                        selected_file_index = new_len - 1;
+                                    } else if new_len == 0 {
+                                        selected_file_index = 0;
+                                    }
+                                }
+                                Err(err) => {
+                                    log::warn!("Failed to delete recording {file_to_delete}: {err}");
+                                }
+                            }
+                        }
+                    }
+                    SdButtonAction::None => {}
+                }
+            } else {
+                if b2_down && !button2_was_pressed {
+                    log::info!("Button 2 (GPIO 7) pressed (mode {})", current_mode.as_str());
+                }
+                if b3_down && !button3_was_pressed {
+                    log::info!("Button 3 (GPIO 6) pressed (mode {})", current_mode.as_str());
+                }
             }
-            button3_was_pressed = b3_pressed;
+            button2_was_pressed = b2_down;
+            button3_was_pressed = b3_down;
 
             let pir_detected = pir_sensor.is_high();
             let mic_detected = audio_buffer.is_signal_present();
@@ -319,13 +447,16 @@ impl App {
                         sd_status = card.inspect();
                     }
                 }
+                let active_rec = recording_controller.current_recording();
                 system_status = SystemStatus::from_runtime_with_sensors(
                     connection.connected,
                     mic_detected,
                     pir_detected,
                     sd_status.clone(),
                     gain_percent,
-                );
+                )
+                .with_recording(active_rec)
+                .with_selected_file_index(selected_file_index);
                 display.render(current_mode, &connection, &system_status)?;
             }
 

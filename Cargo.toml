@@ -29,6 +29,7 @@ ssd1306 = "0.10.0"
 esp-idf-svc = { version = "0.53", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
 # Remove `generic-queue-8` if you plan to use `embassy-time` WITH `embassy-executor`
 embassy-time = { version = "0.5", features = ["generic-queue-8"] }
+enumset = "1.1"
 
 [build-dependencies]
 embuild = "0.33.5"

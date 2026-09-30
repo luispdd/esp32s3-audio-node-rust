@@ -11,13 +11,14 @@ This document provides essential instructions, hardware constraints, toolchain d
   - **PSRAM:** 8 MB Octal PSRAM
 - **Dual-Core Workload Split:**
   - **Core 1:** Real-time I2S audio acquisition, ADC polling, button handling, and OLED rendering.
-  - **Core 0:** Networking (Wi-Fi, HTTP/streaming server), Ogg Opus audio encoding, and MicroSD card writing.
-  - **Memory:** Audio buffers and codec allocations use PSRAM-backed memory to absorb SD write latency.
+  - **Core 0:** Networking (Wi-Fi, HTTP/streaming server), standard WAV audio recording, and MicroSD card writing.
+  - **Memory:** Audio buffers use PSRAM-backed memory to absorb SD write latency.
 
 ### Critical Hardware & SDK Constraints
 > [!CAUTION]
 > - **Reserved PSRAM Bus (GPIO 33-37):** GPIO 33, 34, 35, 36, and 37 are permanently allocated to the Octal PSRAM bus. **NEVER** assign, probe, configure, or read from GPIO 33-37 in software. Doing so corrupts the PSRAM bus and causes an immediate kernel crash.
 > - **I2S IRAM Safe Configuration (`CONFIG_I2S_ISR_IRAM_SAFE=n`):** `CONFIG_I2S_ISR_IRAM_SAFE` in `sdkconfig.defaults` MUST remain disabled (`=n`). `esp-idf-hal` places Rust event callbacks in flash rather than IRAM. Enabling this setting causes `i2s_channel_register_event_callback` to fail with `ESP_ERR_INVALID_ARG` and breaks microphone initialization.
+> - **Opus-rs Xtensa LLVM Instruction Selection:** The Xtensa LLVM backend contains an instruction-selection bug on certain constants (`Constant<-32768>` / `Constant<8192>`) during full release optimization. `Cargo.toml` MUST retain `[profile.release.package.opus-rs]` with `opt-level = "z"`, `debug-assertions = true`, and `overflow-checks = true` to prevent codegen crashes.
 
 ### Fixed Pin Mapping
 | Peripheral | Signal | GPIO | Notes |
@@ -34,8 +35,8 @@ This document provides essential instructions, hardware constraints, toolchain d
 | **PIR Sensor** | OUT | **GPIO 3** | Digital motion input (internal pull-down, active-high) |
 | **Potentiometer**| ADC | **GPIO 4** | ADC1_CH3 analog input for gain / level control |
 | **Button 1 (Mode)** | IN | **GPIO 5** | Active-low, internal pull-up. Short press: cycle mode. Long press: screen power toggle. |
-| **Button 2 (Rec)** | IN | **GPIO 6** | Active-low, internal pull-up. |
-| **Button 3 (Other)**| IN | **GPIO 7** | Active-low, internal pull-up. |
+| **Button 2 (Rec)** | IN | **GPIO 7** | Active-low, internal pull-up. Hardware board mapping for recording toggle. |
+| **Button 3 (Other)**| IN | **GPIO 6** | Active-low, internal pull-up. Hardware board mapping for recording cancel / discard. |
 | **RGB LED (WS2812)**| DATA | **GPIO 38** | Onboard addressable LED (RMT driver). Blue during boot, off after boot. |
 
 ---
@@ -66,12 +67,18 @@ cargo test --no-run
 ### Flashing Hardware & Serial Monitoring
 When requested to flash or verify on board:
 ```bash
-# Flash release binary to board
+# Flash release binary to board (serial port typically /dev/ttyACM0)
 cargo espflash flash --release --target xtensa-esp32s3-espidf --port /dev/ttyACM0
 
-# Monitor serial console at 115200 baud
-espflash monitor --port /dev/ttyACM0
+# Monitor serial console via cargo-espflash (115200 baud)
+cargo espflash monitor --port /dev/ttyACM0
+
+# Quick 3-second serial log inspection (non-blocking)
+timeout 3 cargo espflash monitor --port /dev/ttyACM0
 ```
+> [!NOTE]
+> - `espflash` is installed as a Cargo subcommand (`cargo-espflash` at `~/.cargo/bin/cargo-espflash`). Always invoke it via `cargo espflash ...` or the full binary path.
+> - When testing device web endpoints over LAN, use `curl -m 2 http://<DEVICE_IP>/status` or `curl -m 2 http://<DEVICE_IP>/api/recordings`.
 
 ---
 
@@ -91,45 +98,57 @@ src/
 ├── network.rs      # Local Wi-Fi connection and credentials loader
 ├── potentiometer.rs# ADC1_CH3 potentiometer driver & linear software gain mapping
 ├── led.rs          # Onboard WS2812 RGB LED driver (RMT), boot indicator
+├── time.rs         # NTP client & UTC datetime formatting for recordings (YYYYMMDD_HHMMSS)
 └── audio/
     ├── mod.rs      # Audio module root
     ├── frame.rs    # AudioFrame data structures
     ├── mic.rs      # INMP441 Microphone driver & signal detection
-    └── stream.rs   # LiveAudioStream capture logic
+    ├── recorder.rs # Ogg Opus / audio recording worker and lifecycle controller
+    └── stream.rs   # LiveAudioStream capture logic & HTTP streaming server
 ```
 
-### Key Design Conventions
+### Key Design Conventions & Operational Findings
 1. **Screen Management (`src/display.rs`):**
    - Use `OledDisplay::init(i2c)` to initialize the OLED display.
    - Use `display.is_on()` and `display.set_power(bool)` for display sleep/wake.
    - Add/edit per-mode screens directly in `render_status_screen`, `render_live_screen`, or `render_sd_screen`. `App::run` delegates rendering via `display.render(mode, connection, status)`.
 2. **Button Interactions (`src/modes.rs` & `src/app.rs`):**
    - **Button 1 (GPIO 5):** Managed by `ModeButtonController`. Short press (< 800ms): `ModeButtonAction::CycleMode`. Long press (>= 800ms): `ModeButtonAction::TurnScreenOff`. Press when screen is off: `ModeButtonAction::TurnScreenOn` (wakes display without cycling mode).
-   - **Buttons 2 & 3 (GPIO 6 & 7):** Configured with internal pull-ups (`Pull::Up`), active-low. Polled in loop with edge-detection logging.
+   - **Button 2 (GPIO 7 physically):** Configured with internal pull-up (`Pull::Up`), active-low. In `SD_MODE`, toggles start/stop recording.
+   - **Button 3 (GPIO 6 physically):** Configured with internal pull-up (`Pull::Up`), active-low. In `SD_MODE`, cancels in-progress recording and discards file.
 3. **Microphone Acquisition (`src/audio/mic.rs`):**
    - Use `Microphone::new(i2s0, pins.gpio14, pins.gpio15, pins.gpio16)` to initialize the INMP441 (Philips standard, 16 kHz, 32-bit slot).
    - Must call `driver.rx_enable()?` on driver initialization.
    - Use `read_samples(&mut buf, timeout_ticks)` for live acquisition and `probe_signal()` / `detect_signal(&buf)` for acoustic activity checks.
 4. **Sensor Status Aggregation (`src/status.rs`):**
    - Use `SystemStatus::from_runtime_with_sensors(wifi, mic, pir, sd_card, gain_percent)` to feed real live sensor states and potentiometer gain to STATUS_MODE OLED rendering (`g:<N>%`).
-5. **SD Card Management (`src/sd.rs`):**
+5. **MicroSD Card & FATFS SPI Stack Safety (`src/sd.rs` & `src/audio/recorder.rs`):**
    - Do **NOT** call `Peripherals::take()` inside helper functions. Pass acquired pins/peripherals down from `App::run`.
+   - MicroSD operates on SPI3 with FATFS mounted at `/sdcard`. Recordings belong in `/sdcard/audio`.
+   - **Stack & Memory Rule for SD File IO:** Any thread executing FATFS/SD operations (e.g. `File::create`, `write`) must have its stack allocated in **internal SRAM** (`< 16 KB`) with 32-bit alignment capabilities: `enum_set!(MallocCap::Internal | MallocCap::Cap32bit | MallocCap::Cap8bit)`. Allocating stack in PSRAM or omitting `Cap32bit` triggers MMU bus contention and `LoadStoreAlignment` hardware panics on Xtensa.
 6. **Live Audio Capture & Ring Buffer (`src/audio/stream.rs` & `src/audio/mic.rs`):**
    - Real-time I2S audio capture runs in a dedicated worker thread pinned to **Core 1** via `ThreadSpawnConfiguration` (`Core::Core1`).
    - Use `SharedAudioBuffer` (PSRAM-backed ring buffer) to decouple real-time capture from Core 0 network/recording tasks. Consumers track progress with monotonic sequence IDs without blocking the capture thread.
    - `convert_i2s_bytes_to_pcm16_with_gain(raw, gain: f32)` scales 32-bit INMP441 samples to 16-bit PCM linearly (`gain <= 0.0` outputs all zeros for digital silence).
    - Use `audio_buffer.set_gain(gain, percent)` / `audio_buffer.current_gain()` / `audio_buffer.current_gain_percent()` for non-blocking lock-free atomic gain sharing between Core 1 and Core 0. Query `audio_buffer.is_signal_present()` for sensor status checks to prevent I2S hardware read contention.
-7. **HTTP Server & Web Assets (`web/index.html` & `src/audio/stream.rs`):**
+7. **HTTP Server & Web Client Efficiency (`web/index.html` & `src/audio/stream.rs`):**
    - Browser UI templates must live in `web/index.html` (embedded via `include_str!("../../web/index.html")` using `{{ENDPOINT}}` substitution) to keep web assets and Rust code cleanly decoupled.
    - Live audio endpoint `/stream.wav` streams chunked 16-bit PCM prefixed by a 44-byte WAV header (`create_wav_header`) with `0x7fff_ffff` streaming chunk size.
+   - **Energy-Efficiency Rule:** Avoid automatic high-frequency polling loops (e.g. `setInterval(pollStatus, 1500)`) in the web client. Battery and low-power IoT operation requires pulling status on page load and on explicit user interaction via a **Refresh** button.
 8. **Wi-Fi Driver Persistence (`src/network.rs`):**
    - `BlockingWifi` / `EspWifi` shuts down the radio on drop. Keep the driver permanently active using `std::mem::forget(wifi)` in `connect_with_modem`.
 9. **Potentiometer & ADC Gain Control (`src/potentiometer.rs`):**
    - Use `Potentiometer::new(adc1, pins.gpio4)` to initialize the 12-bit oneshot ADC driver on `ADC1` (`ADCCH3<ADCU1>`, attenuation `DB_12`).
    - Poll `pot.read_gain()` inside the Core 1 audio capture loop (each 20ms frame). Raw ADC values map linearly: deadband (`raw <= 40`) produces `0.0` (silence), full scale (`4095`) produces `4.0x` max gain, and intermediate values scale proportionally.
 10. **Onboard RGB LED (`src/led.rs`):**
-   - The onboard WS2812 RGB LED is connected to **GPIO 38** and driven via the RMT peripheral using `RgbLed::new(pins.gpio38)`.
-   - It is set to Blue (`set_booting()`) as soon as `App::run` begins, and turned off (`turn_off()`) once all subsystems (Wi-Fi, I2C, SD, Audio, HTTP servers) have finished initializing before entering the main polling loop.
+    - The onboard WS2812 RGB LED is connected to **GPIO 38** and driven via the RMT peripheral using `RgbLed::new(pins.gpio38)`.
+    - It is set to Blue (`set_booting()`) as soon as `App::run` begins, and turned off (`turn_off()`) once all subsystems (Wi-Fi, I2C, SD, Audio, HTTP servers) have finished initializing before entering the main polling loop.
+11. **NTP Time Synchronization (`src/time.rs`):**
+    - Initialized via `NtpClient::init()` using `EspSntp` in `Poll` operating mode against `pool.ntp.org`.
+    - `UtcDateTime::now()` returns UTC calendar components and generates recording filenames: `YYYYMMDD_HHMMSS.wav`.
+12. **Audio Recording Architecture (Standard WAV):**
+    - Recordings are stored in standard 16 kHz 16-bit mono RIFF WAV format (`/sdcard/audio/YYYYMMDD_HHMMSS.wav`).
+    - Standard WAV avoids compression memory overhead, eliminates FreeRTOS thread stack overflows, avoids Xtensa LLVM codegen bugs associated with pure-Rust Opus, and provides out-of-the-box browser playback (`audio/wav`).
 
 ---
 
