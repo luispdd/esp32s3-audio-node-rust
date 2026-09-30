@@ -14,11 +14,12 @@ This proposal follows the hardware baseline defined in the project’s initial s
 - Preserve the hardware contract defined in the original design: INMP441 on GPIO 14/15/16, SD SPI on GPIO 12/11/13/10, OLED I2C on GPIO 8/9, PIR on GPIO 3, ADC gain control on GPIO 4, and buttons on GPIO 5/6/7 while avoiding GPIO 33-37.
 - Implement a device mode system (STATUS_MODE, LIVE_MODE, SD_MODE) driven by Button 1 (GPIO 5), with a dedicated OLED display layout per mode, short-press mode rotation, and long-press display power toggling (off/on).
 - Extract screen management into `src/display.rs` and SD card management into `src/sd.rs` to maintain a clean, extensible module boundary as the codebase grows.
+- Add web-based gain override controls to the browser live stream player (a checkbox to enable override and a slider to set 0–100% gain) so listeners can adjust audio level remotely without touching the physical board, persisting in memory until unchecked or board restart.
 
 ## Capabilities
 
 ### New Capabilities
-- `audio-streaming`: the ESP32-S3 device captures audio, exposes it to the browser, records it to SD card, and replays stored recordings through a browser without requiring external services.
+- `audio-streaming`: the ESP32-S3 device captures audio, exposes it to the browser with real-time gain control (physical potentiometer and browser override), records it to SD card, and replays stored recordings through a browser without requiring external services.
 - `device-mode-system`: a button-driven, OLED-displayed mode switching layer (STATUS_MODE, LIVE_MODE, SD_MODE) that provides a verifiable interactive foundation before the full audio pipeline is activated.
 
 ### Modified Capabilities

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -64,6 +64,53 @@ impl Drop for ListenerGuard {
     }
 }
 
+/// Parses gain override parameters from either a URI query string or a JSON body string.
+/// Returns (override_active, value_percent_0_to_100).
+pub fn parse_gain_override_params(uri: &str, body: &str) -> (Option<bool>, Option<u8>) {
+    let mut override_opt = None;
+    let mut value_opt = None;
+
+    // 1. Check URI query parameters (e.g. ?override=true&value=75)
+    if let Some(query_idx) = uri.find('?') {
+        let query = &uri[query_idx + 1..];
+        for param in query.split('&') {
+            if let Some((k, v)) = param.split_once('=') {
+                if k.eq_ignore_ascii_case("override") {
+                    override_opt = Some(v.eq_ignore_ascii_case("true") || v == "1");
+                } else if k.eq_ignore_ascii_case("value") {
+                    if let Ok(val) = v.parse::<u8>() {
+                        value_opt = Some(val.clamp(0, 100));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fall back to body parameters if not present in query string
+    if override_opt.is_none() {
+        if body.contains("\"override\":true") || body.contains("\"override\": true") {
+            override_opt = Some(true);
+        } else if body.contains("\"override\":false") || body.contains("\"override\": false") {
+            override_opt = Some(false);
+        }
+    }
+
+    if value_opt.is_none() {
+        if let Some(idx) = body.find("\"value\":") {
+            let after = &body[idx + 8..];
+            let trimmed = after.trim_start();
+            let end = trimmed
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(trimmed.len());
+            if let Ok(val) = trimmed[..end].parse::<u8>() {
+                value_opt = Some(val.clamp(0, 100));
+            }
+        }
+    }
+
+    (override_opt, value_opt)
+}
+
 /// Thread-safe ring buffer for sharing live audio frames between Core 1 and Core 0.
 /// Backed by heap/PSRAM allocations, keeping real-time acquisition decoupled from network I/O.
 #[derive(Clone)]
@@ -77,6 +124,12 @@ struct AudioBufferInner {
     listener_count: Arc<AtomicUsize>,
     gain_bits: AtomicU32,
     gain_percent: AtomicU32,
+    /// When true, the web-override gain is used instead of the physical potentiometer.
+    gain_override_active: AtomicBool,
+    /// The web-override gain multiplier stored as f32 bits.
+    gain_override_bits: AtomicU32,
+    /// The web-override gain as a percentage (0..=100).
+    gain_override_percent: AtomicU32,
 }
 
 struct AudioBufferState {
@@ -101,6 +154,9 @@ impl SharedAudioBuffer {
                 listener_count: Arc::new(AtomicUsize::new(0)),
                 gain_bits: AtomicU32::new(1.0_f32.to_bits()),
                 gain_percent: AtomicU32::new(25),
+                gain_override_active: AtomicBool::new(false),
+                gain_override_bits: AtomicU32::new(1.0_f32.to_bits()),
+                gain_override_percent: AtomicU32::new(25),
             }),
         }
     }
@@ -170,14 +226,55 @@ impl SharedAudioBuffer {
         self.inner.gain_percent.store(percent as u32, Ordering::Relaxed);
     }
 
-    /// Returns the current software gain multiplier.
+    /// Returns the active software gain multiplier (override if active, else potentiometer).
     pub fn current_gain(&self) -> f32 {
+        if self.is_gain_override_active() {
+            self.gain_override()
+        } else {
+            f32::from_bits(self.inner.gain_bits.load(Ordering::Relaxed))
+        }
+    }
+
+    /// Returns the active software gain percentage 0..=100 (override if active, else potentiometer).
+    pub fn current_gain_percent(&self) -> u8 {
+        if self.is_gain_override_active() {
+            self.gain_override_percent()
+        } else {
+            self.inner.gain_percent.load(Ordering::Relaxed) as u8
+        }
+    }
+
+    /// Returns the physical potentiometer gain multiplier regardless of override state.
+    pub fn potentiometer_gain(&self) -> f32 {
         f32::from_bits(self.inner.gain_bits.load(Ordering::Relaxed))
     }
 
-    /// Returns the current software gain level as a percentage (0..=100).
-    pub fn current_gain_percent(&self) -> u8 {
+    /// Returns the physical potentiometer gain percentage regardless of override state.
+    pub fn potentiometer_gain_percent(&self) -> u8 {
         self.inner.gain_percent.load(Ordering::Relaxed) as u8
+    }
+
+    /// Activates or deactivates the web-based gain override.
+    /// When active, the audio capture loop uses `gain` and `percent` instead of the potentiometer.
+    pub fn set_gain_override(&self, active: bool, gain: f32, percent: u8) {
+        self.inner.gain_override_active.store(active, Ordering::Relaxed);
+        self.inner.gain_override_bits.store(gain.to_bits(), Ordering::Relaxed);
+        self.inner.gain_override_percent.store(percent as u32, Ordering::Relaxed);
+    }
+
+    /// Returns true if the web-based gain override is currently active.
+    pub fn is_gain_override_active(&self) -> bool {
+        self.inner.gain_override_active.load(Ordering::Relaxed)
+    }
+
+    /// Returns the web-override gain multiplier.
+    pub fn gain_override(&self) -> f32 {
+        f32::from_bits(self.inner.gain_override_bits.load(Ordering::Relaxed))
+    }
+
+    /// Returns the web-override gain as a percentage (0..=100).
+    pub fn gain_override_percent(&self) -> u8 {
+        self.inner.gain_override_percent.load(Ordering::Relaxed) as u8
     }
 }
 
@@ -250,45 +347,67 @@ impl LiveAudioStream {
     pub fn start_server(
         shared_buffer: SharedAudioBuffer,
         port: u16,
-    ) -> Result<EspHttpServer<'static>, String> {
-        let config = HttpServerConfig {
+    ) -> Result<ServerHandle, String> {
+        let stream_port = 8080;
+
+        // ── 1. Main HTTP Server (Port 80) ───────────────────────────────────
+        // Serves HTML page, /status, and /gain control endpoints.
+        // Never executes any blocking loops, remaining 100% responsive.
+        let main_config = HttpServerConfig {
             http_port: port,
+            ctrl_port: 32768,
             max_open_sockets: 4,
             stack_size: 8192,
+            uri_match_wildcard: true,
             ..Default::default()
         };
 
-        let mut server = EspHttpServer::new(&config)
-            .map_err(|err| format!("Failed to start EspHttpServer: {err}"))?;
+        let mut main_server = EspHttpServer::new(&main_config)
+            .map_err(|err| format!("Failed to start main EspHttpServer on port {port}: {err}"))?;
 
-        // 1. Root page handler: serves the embedded, self-contained HTML player page
         let page_html = Self::build_browser_page("/stream.wav");
-        server
+        let root_html = page_html.clone();
+        main_server
             .fn_handler("/", Method::Get, move |req| -> Result<(), EspIOError> {
                 let headers = [
                     ("Content-Type", "text/html; charset=utf-8"),
                     ("Cache-Control", "no-cache, no-store, must-revalidate"),
                 ];
                 let mut resp = req.into_response(200, Some("OK"), &headers)?;
-                resp.write_all(page_html.as_bytes())?;
+                resp.write_all(root_html.as_bytes())?;
                 Ok(())
             })
             .map_err(|err| format!("Failed to register root handler: {err}"))?;
 
-        // 2. Status handler: returns device streaming health in JSON
+        let index_html = page_html;
+        main_server
+            .fn_handler("/index.html*", Method::Get, move |req| -> Result<(), EspIOError> {
+                let headers = [
+                    ("Content-Type", "text/html; charset=utf-8"),
+                    ("Cache-Control", "no-cache, no-store, must-revalidate"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(index_html.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /index.html handler: {err}"))?;
+
         let status_buffer = shared_buffer.clone();
-        server
-            .fn_handler("/status", Method::Get, move |req| -> Result<(), EspIOError> {
+        main_server
+            .fn_handler("/status*", Method::Get, move |req| -> Result<(), EspIOError> {
                 let listeners = status_buffer.active_listeners();
                 let signal = status_buffer.is_signal_present();
                 let gain_percent = status_buffer.current_gain_percent();
+                let override_active = status_buffer.is_gain_override_active();
+                let override_percent = status_buffer.gain_override_percent();
                 let body = format!(
-                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{}}}"#,
-                    signal, listeners, gain_percent
+                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{}}}"#,
+                    signal, listeners, gain_percent, override_active, override_percent
                 );
                 let headers = [
                     ("Content-Type", "application/json"),
                     ("Cache-Control", "no-cache"),
+                    ("Access-Control-Allow-Origin", "*"),
                 ];
                 let mut resp = req.into_response(200, Some("OK"), &headers)?;
                 resp.write_all(body.as_bytes())?;
@@ -296,22 +415,148 @@ impl LiveAudioStream {
             })
             .map_err(|err| format!("Failed to register status handler: {err}"))?;
 
-        // 3. Audio stream handler: continuous WAV streaming over HTTP chunked response
+        let gain_post_buffer = shared_buffer.clone();
+        main_server
+            .fn_handler("/gain*", Method::Post, move |mut req| -> Result<(), EspIOError> {
+                let uri = req.uri();
+                let (mut override_opt, mut value_opt) = parse_gain_override_params(uri, "");
+
+                if override_opt.is_none() || value_opt.is_none() {
+                    let content_len = req
+                        .header("Content-Length")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+
+                    if content_len > 0 {
+                        let mut body_buf = [0u8; 128];
+                        let to_read = content_len.min(body_buf.len());
+                        let mut read_bytes = 0;
+                        while read_bytes < to_read {
+                            match req.read(&mut body_buf[read_bytes..to_read]) {
+                                Ok(0) => break,
+                                Ok(n) => read_bytes += n,
+                                Err(err) => {
+                                    log::warn!("Error reading /gain body: {:?}", err);
+                                    break;
+                                }
+                            }
+                        }
+                        let body_str = core::str::from_utf8(&body_buf[..read_bytes]).unwrap_or("");
+                        let (body_override, body_value) = parse_gain_override_params("", body_str);
+                        if override_opt.is_none() {
+                            override_opt = body_override;
+                        }
+                        if value_opt.is_none() {
+                            value_opt = body_value;
+                        }
+                    }
+                }
+
+                let override_active = override_opt.unwrap_or(false);
+                let value_percent = value_opt.unwrap_or_else(|| gain_post_buffer.gain_override_percent());
+
+                let gain_multiplier = (value_percent as f32 / 100.0) * crate::potentiometer::DEFAULT_MAX_GAIN;
+                gain_post_buffer.set_gain_override(override_active, gain_multiplier, value_percent);
+
+                log::info!(
+                    "Web gain override updated (POST): active={}, value={}%, multiplier={:.2}x",
+                    override_active, value_percent, gain_multiplier
+                );
+
+                let resp_body = format!(
+                    r#"{{"ok":true,"gain_override_active":{},"gain_override_percent":{}}}"#,
+                    override_active, value_percent
+                );
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Cache-Control", "no-cache, no-store, must-revalidate"),
+                    ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Methods", "POST, GET, OPTIONS"),
+                    ("Access-Control-Allow-Headers", "*"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(resp_body.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /gain POST handler: {err}"))?;
+
+        let gain_get_buffer = shared_buffer.clone();
+        main_server
+            .fn_handler("/gain*", Method::Get, move |req| -> Result<(), EspIOError> {
+                let (override_opt, value_opt) = parse_gain_override_params(req.uri(), "");
+                if let Some(active) = override_opt {
+                    let value_percent = value_opt.unwrap_or_else(|| gain_get_buffer.gain_override_percent());
+                    let gain_multiplier = (value_percent as f32 / 100.0) * crate::potentiometer::DEFAULT_MAX_GAIN;
+                    gain_get_buffer.set_gain_override(active, gain_multiplier, value_percent);
+                }
+                let override_active = gain_get_buffer.is_gain_override_active();
+                let value_percent = gain_get_buffer.gain_override_percent();
+
+                log::info!(
+                    "Web gain override updated (GET): active={}, value={}%",
+                    override_active, value_percent
+                );
+
+                let resp_body = format!(
+                    r#"{{"ok":true,"gain_override_active":{},"gain_override_percent":{}}}"#,
+                    override_active, value_percent
+                );
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Cache-Control", "no-cache, no-store, must-revalidate"),
+                    ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Methods", "POST, GET, OPTIONS"),
+                    ("Access-Control-Allow-Headers", "*"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(resp_body.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /gain GET handler: {err}"))?;
+
+        main_server
+            .fn_handler("/gain*", Method::Options, |req| -> Result<(), EspIOError> {
+                let headers = [
+                    ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Methods", "POST, GET, OPTIONS"),
+                    ("Access-Control-Allow-Headers", "*"),
+                    ("Content-Length", "0"),
+                ];
+                let _resp = req.into_response(200, Some("OK"), &headers)?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /gain OPTIONS handler: {err}"))?;
+
+        // ── 2. Dedicated Streaming Server (Port 8080) ────────────────────────
+        // Pinned to its own FreeRTOS task so that the continuous audio streaming
+        // loop never blocks the main HTTP server from handling /gain, /status, etc.
+        let stream_config = HttpServerConfig {
+            http_port: stream_port,
+            ctrl_port: 32769,
+            max_open_sockets: 4,
+            stack_size: 8192,
+            uri_match_wildcard: true,
+            ..Default::default()
+        };
+
+        let mut stream_server = EspHttpServer::new(&stream_config)
+            .map_err(|err| format!("Failed to start streaming EspHttpServer on port {stream_port}: {err}"))?;
+
         let stream_buffer = shared_buffer.clone();
-        let stream_handler = move |req: esp_idf_svc::http::server::Request<&mut esp_idf_svc::http::server::EspHttpConnection<'_>>| -> Result<(), EspIOError> {
+        let make_stream_handler = move |req: esp_idf_svc::http::server::Request<&mut esp_idf_svc::http::server::EspHttpConnection<'_>>| -> Result<(), EspIOError> {
             let _guard = stream_buffer.listener_guard();
             log::info!("Live audio client connected to stream");
 
             let headers = [
                 ("Content-Type", "audio/wav"),
                 ("Cache-Control", "no-cache, no-store, must-revalidate"),
+                ("Access-Control-Allow-Origin", "*"),
                 ("Pragma", "no-cache"),
                 ("Connection", "close"),
             ];
 
             let mut resp = req.into_response(200, Some("OK"), &headers)?;
 
-            // Send 44-byte WAV header for streaming (0x7fff_ffff indicates streaming data chunk)
             let wav_header = create_wav_header(16_000, 1, 16, 0x7fff_ffff);
             resp.write_all(&wav_header)?;
 
@@ -331,23 +576,84 @@ impl LiveAudioStream {
             }
         };
 
-        server
-            .fn_handler("/stream.wav", Method::Get, stream_handler)
-            .map_err(|err| format!("Failed to register /stream.wav handler: {err}"))?;
+        let main_fallback_buffer = shared_buffer.clone();
+        let main_stream_handler = move |req: esp_idf_svc::http::server::Request<&mut esp_idf_svc::http::server::EspHttpConnection<'_>>| -> Result<(), EspIOError> {
+            let _guard = main_fallback_buffer.listener_guard();
+            log::info!("Live audio client connected to main server stream fallback");
 
-        log::info!("EspHttpServer live streaming endpoints registered on port {port}: / and /stream.wav");
+            let headers = [
+                ("Content-Type", "audio/wav"),
+                ("Cache-Control", "no-cache, no-store, must-revalidate"),
+                ("Access-Control-Allow-Origin", "*"),
+                ("Pragma", "no-cache"),
+                ("Connection", "close"),
+            ];
 
-        Ok(server)
+            let mut resp = req.into_response(200, Some("OK"), &headers)?;
+            let wav_header = create_wav_header(16_000, 1, 16, 0x7fff_ffff);
+            resp.write_all(&wav_header)?;
+
+            let mut last_seq = 0u64;
+
+            loop {
+                let (frames, new_seq) = main_fallback_buffer.fetch_frames(last_seq, Duration::from_millis(200));
+                last_seq = new_seq;
+
+                for frame in frames {
+                    let bytes = frame.to_le_bytes();
+                    if let Err(err) = resp.write_all(&bytes) {
+                        log::info!("Audio stream fallback client disconnected: {err}");
+                        return Ok(());
+                    }
+                }
+            }
+        };
+
+        stream_server
+            .fn_handler("/stream.wav*", Method::Get, make_stream_handler)
+            .map_err(|err| format!("Failed to register /stream.wav handler on streaming server: {err}"))?;
+
+        stream_server
+            .fn_handler("/stream.wav*", Method::Options, |req| -> Result<(), EspIOError> {
+                let headers = [
+                    ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Methods", "GET, OPTIONS"),
+                    ("Access-Control-Allow-Headers", "*"),
+                    ("Content-Length", "0"),
+                ];
+                let _resp = req.into_response(200, Some("OK"), &headers)?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /stream.wav OPTIONS on streaming server: {err}"))?;
+
+        // Fallback on main server
+        main_server
+            .fn_handler("/stream.wav*", Method::Get, main_stream_handler)
+            .map_err(|err| format!("Failed to register fallback /stream.wav handler on main server: {err}"))?;
+
+        log::info!("Servers started: Main server on port {port} (UI & controls), Streaming server on port {stream_port} (/stream.wav*)");
+
+        Ok(ServerHandle {
+            _main: main_server,
+            _stream: stream_server,
+        })
     }
 
     #[cfg(not(target_arch = "xtensa"))]
     pub fn start_server(
         _shared_buffer: SharedAudioBuffer,
         _port: u16,
-    ) -> Result<(), String> {
+    ) -> Result<ServerHandle, String> {
         log::info!("Mock HTTP server started (non-xtensa architecture)");
-        Ok(())
+        Ok(ServerHandle)
     }
+}
+
+pub struct ServerHandle {
+    #[cfg(target_arch = "xtensa")]
+    _main: EspHttpServer<'static>,
+    #[cfg(target_arch = "xtensa")]
+    _stream: EspHttpServer<'static>,
 }
 
 impl Default for LiveAudioStream {
@@ -452,5 +758,54 @@ mod tests {
         buffer.set_gain(3.5, 88);
         assert!((buffer.current_gain() - 3.5).abs() < 0.001);
         assert_eq!(buffer.current_gain_percent(), 88);
+
+        // Web override activates
+        buffer.set_gain_override(true, 1.5, 37);
+        assert!(buffer.is_gain_override_active());
+        assert!((buffer.current_gain() - 1.5).abs() < 0.001);
+        assert_eq!(buffer.current_gain_percent(), 37);
+        // Potentiometer values are preserved in the background
+        assert!((buffer.potentiometer_gain() - 3.5).abs() < 0.001);
+        assert_eq!(buffer.potentiometer_gain_percent(), 88);
+
+        // Potentiometer can update in background while override is active
+        buffer.set_gain(2.0, 50);
+        assert!((buffer.potentiometer_gain() - 2.0).abs() < 0.001);
+        assert_eq!(buffer.potentiometer_gain_percent(), 50);
+        // But active gain is still the override value
+        assert!((buffer.current_gain() - 1.5).abs() < 0.001);
+        assert_eq!(buffer.current_gain_percent(), 37);
+
+        // Deactivating override reverts back to potentiometer reading
+        buffer.set_gain_override(false, 1.5, 37);
+        assert!(!buffer.is_gain_override_active());
+        assert!((buffer.current_gain() - 2.0).abs() < 0.001);
+        assert_eq!(buffer.current_gain_percent(), 50);
+    }
+
+    #[test]
+    fn parse_gain_override_from_uri_query() {
+        let (active, val) = parse_gain_override_params("/gain?override=true&value=75", "");
+        assert_eq!(active, Some(true));
+        assert_eq!(val, Some(75));
+
+        let (active2, val2) = parse_gain_override_params("/gain?override=false&value=0", "");
+        assert_eq!(active2, Some(false));
+        assert_eq!(val2, Some(0));
+
+        let (active3, val3) = parse_gain_override_params("/gain?override=1&value=100", "");
+        assert_eq!(active3, Some(true));
+        assert_eq!(val3, Some(100));
+    }
+
+    #[test]
+    fn parse_gain_override_from_json_body() {
+        let (active, val) = parse_gain_override_params("/gain", r#"{"override":true,"value":60}"#);
+        assert_eq!(active, Some(true));
+        assert_eq!(val, Some(60));
+
+        let (active2, val2) = parse_gain_override_params("/gain", r#"{"override": false, "value": 25}"#);
+        assert_eq!(active2, Some(false));
+        assert_eq!(val2, Some(25));
     }
 }

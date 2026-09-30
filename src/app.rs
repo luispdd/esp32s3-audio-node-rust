@@ -162,21 +162,22 @@ impl App {
                     .spawn(move || {
                         log::info!("Audio capture worker thread started on Core 1");
                         loop {
-                            let current_gain = if let Ok(ref mut pot) = potentiometer {
+                            // Poll the physical potentiometer every frame so its value is always
+                            // fresh and ready to be applied the moment the web override is lifted.
+                            if let Ok(ref mut pot) = potentiometer {
                                 match pot.read_gain() {
                                     Ok(g) => {
                                         let pct = pot.last_gain_percent();
                                         capture_buffer.set_gain(g, pct);
-                                        g
                                     }
                                     Err(err) => {
                                         log::warn!("Potentiometer read error: {err}");
-                                        capture_buffer.current_gain()
                                     }
                                 }
-                            } else {
-                                capture_buffer.current_gain()
-                            };
+                            }
+
+                            // Active gain respects the web override if enabled, else uses potentiometer
+                            let current_gain = capture_buffer.current_gain();
 
                             match active_mic.read_frame_with_gain(320, 50, current_gain) {
                                 Ok(frame) => {

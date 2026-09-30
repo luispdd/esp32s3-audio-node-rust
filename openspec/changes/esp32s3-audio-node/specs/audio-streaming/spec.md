@@ -95,3 +95,18 @@ The system SHALL use Button 1 (GPIO 5) to cycle between device modes on a short 
 - **WHEN** Button 1 is pressed while the screen is turned off
 - **THEN** the system SHALL turn on the OLED display and restore the current mode view
 
+### Requirement: Web interface allows overriding potentiometer gain
+The system SHALL allow a browser user to override the physical potentiometer gain during live stream listening through the web interface, persisting until explicitly disabled or until the device reboots.
+
+#### Scenario: User enables web gain override
+- **WHEN** the user checks the gain override checkbox and selects a gain value on the browser page
+- **THEN** the system SHALL apply the web-specified gain multiplier to the captured audio and reflect the override percentage in system status
+
+#### Scenario: User disables web gain override
+- **WHEN** the user unchecks the gain override checkbox
+- **THEN** the system SHALL immediately revert to using the physical potentiometer's gain reading for audio capture
+
+#### Scenario: Device reboots while override was active
+- **WHEN** the device restarts
+- **THEN** the system SHALL initialize with the gain override disabled, defaulting to the physical potentiometer reading
+

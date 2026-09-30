@@ -36,6 +36,7 @@
 - [x] 3.2 Implement the browser-accessible live stream endpoint or minimal serving page and verify a browser can connect to the device over Wi-Fi
 - [x] 3.3 Deliver the live audio payload to the client and verify playback is audible in the browser without external resources
 - [x] 3.4 Wire the potentiometer (GPIO 4 / ADC1_CH3) to the microphone gain stage: continuously poll ADC1_CH3 on Core 1, map the raw ADC reading linearly to a software gain multiplier where the minimum position produces complete silence (multiplier = 0) and the maximum position applies the highest gain (multiplier = max), apply the multiplier inside `convert_i2s_bytes_to_pcm16_with_gain`, and reflect the current gain level on the STATUS_MODE OLED screen
+- [x] 3.5 Add web-based gain override controls to the browser player page: a checkbox to activate the override and a range slider (0–100%) to set the gain value. When the override is active the browser POSTs `{"override": true, "value": <0-100>}` to a new `POST /gain` endpoint; the firmware stores the override in `SharedAudioBuffer` and the Core 1 capture loop uses it instead of the physical potentiometer reading. Unchecking the checkbox (or restarting the board) reverts to the potentiometer. On page load the UI syncs its state from `GET /status` which now includes `gain_override_active` and `gain_override_percent` fields.
 
 ## 4. Recording to SD Card
 

@@ -99,6 +99,17 @@ The potentiometer wiper is polled periodically on Core 1 alongside the other rea
 
 **Alternative considered:** exposing gain as a network-settable parameter rather than a physical control. Rejected because the potentiometer is already wired to GPIO 4 per the hardware baseline and a physical knob gives immediate, tactile feedback without requiring a browser session.
 
+### 9. Provide web-based gain override controls during browser listening
+While listening to the live audio stream in a browser, users may find the volume suboptimal and lack physical access to the board's potentiometer. To support remote adjustment without sacrificing the physical control baseline:
+- The browser player page includes a checkbox to activate the override and a slider to select a gain percentage (0..=100%).
+- Changes are submitted via `POST /gain` (or `GET /gain`) supporting both URI query parameters (`?override=true&value=50`) and JSON request bodies (`{"override": true, "value": 50}`). The endpoint also handles `OPTIONS` for CORS preflight.
+- The firmware stores the override state atomically in `SharedAudioBuffer` (`gain_override_active`, `gain_override_bits`, `gain_override_percent`).
+- Core 1 continues polling the physical potentiometer every frame so that its reading is always fresh, but `SharedAudioBuffer::current_gain()` applies the web override whenever active.
+- Both the OLED display in STATUS_MODE and the `/status` API endpoint reflect the active gain.
+- The override persists in memory until the user unchecks the checkbox on the web page or the board reboots, at which point the device immediately falls back to the physical potentiometer.
+
+**Alternative considered:** persisting the web override to NVS flash across reboots. Rejected because the physical potentiometer is the hardware source of truth on boot; storing override across power cycles could result in confusing silent or high-gain states upon restart.
+
 ## Risks / Trade-offs
 
 - [Audio buffer pressure under SD write stalls] → Use PSRAM-backed buffers and a dual-core split so the real-time capture path remains stable while recording or network activity happens.

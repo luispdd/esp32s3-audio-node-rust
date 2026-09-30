@@ -123,6 +123,60 @@ audio {
   text-decoration: none;
 }
 .direct-link:hover { text-decoration: underline; }
+.gain-override {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  margin-top: 0.25rem;
+}
+.gain-override-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.gain-override-header label {
+  font-size: 0.85rem;
+  color: #c9d1d9;
+  cursor: pointer;
+  user-select: none;
+}
+.gain-override input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: #58a6ff;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.gain-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.gain-slider-row input[type="range"] {
+  flex: 1;
+  accent-color: #58a6ff;
+  height: 4px;
+  cursor: pointer;
+}
+.gain-slider-row input[type="range"]:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.gain-label {
+  font-size: 0.8rem;
+  color: #8b949e;
+  min-width: 2.5rem;
+  text-align: right;
+}
+.gain-status {
+  font-size: 0.7rem;
+  color: #58a6ff;
+  min-height: 1em;
+}
 </style>
 </head>
 <body>
@@ -146,7 +200,7 @@ audio {
     </div>
     <div class="info-box">
       <div class="info-label">Endpoint</div>
-      <div class="info-value">{{ENDPOINT}}</div>
+      <div class="info-value" id="endpointInfo">:8080/stream.wav</div>
     </div>
   </div>
 
@@ -154,9 +208,21 @@ audio {
 
   <div class="player-controls">
     <button id="toggleBtn" onclick="togglePlay()">Play Live Stream</button>
-    <audio id="audio" controls preload="none" src="{{ENDPOINT}}"></audio>
+    <audio id="audio" controls preload="none" crossorigin="anonymous"></audio>
+    <div class="gain-override">
+      <div class="gain-override-header">
+        <input type="checkbox" id="gainOverrideCheck" onchange="onOverrideToggle()">
+        <label for="gainOverrideCheck">Override potentiometer gain</label>
+      </div>
+      <div class="gain-slider-row">
+        <input type="range" id="gainSlider" min="0" max="100" value="50"
+               oninput="onSliderInput()" onchange="sendGain()" disabled>
+        <span class="gain-label" id="gainPct">50%</span>
+      </div>
+      <div class="gain-status" id="gainStatus"></div>
+    </div>
   </div>
-  <a class="direct-link" href="{{ENDPOINT}}" target="_blank">Direct Stream Link: {{ENDPOINT}}</a>
+  <a class="direct-link" id="directLink" href="#" target="_blank">Direct Stream Link: :8080/stream.wav</a>
 </div>
 
 <script>
@@ -167,6 +233,22 @@ const ctx = canvas.getContext('2d');
 let audioCtx = null;
 let analyser = null;
 let animId = null;
+
+const STREAM_PORT = 8080;
+function getStreamUrl() {
+  const host = window.location.hostname || '127.0.0.1';
+  return window.location.protocol + '//' + host + ':' + STREAM_PORT + '/stream.wav';
+}
+
+// Initialize endpoint indicators
+const initialStreamUrl = getStreamUrl();
+const endpointInfo = document.getElementById('endpointInfo');
+const directLink = document.getElementById('directLink');
+if (endpointInfo) endpointInfo.textContent = initialStreamUrl;
+if (directLink) {
+  directLink.href = initialStreamUrl;
+  directLink.textContent = 'Direct Stream Link: ' + initialStreamUrl;
+}
 
 function setupAudioContext() {
   if (audioCtx) return;
@@ -219,8 +301,8 @@ function togglePlay() {
   }
 
   if (audio.paused) {
-    // Append timestamp to ensure fresh HTTP connection
-    audio.src = "{{ENDPOINT}}?t=" + Date.now();
+    // Append timestamp to ensure fresh connection to streaming server on port 8080
+    audio.src = getStreamUrl() + "?t=" + Date.now();
     audio.play().then(() => {
       btn.textContent = "Pause Stream";
       btn.className = "btn-stop";
@@ -230,6 +312,9 @@ function togglePlay() {
     });
   } else {
     audio.pause();
+    // Detach src to immediately free the streaming connection on the server
+    audio.removeAttribute('src');
+    audio.load();
     btn.textContent = "Play Live Stream";
     btn.className = "";
     if (animId) cancelAnimationFrame(animId);
@@ -250,6 +335,67 @@ audio.addEventListener('pause', () => {
 });
 
 drawVisualizer();
+
+// ── Gain override controls ──────────────────────────────────────────────────
+const gainCheck  = document.getElementById('gainOverrideCheck');
+const gainSlider = document.getElementById('gainSlider');
+const gainPct    = document.getElementById('gainPct');
+const gainStatus = document.getElementById('gainStatus');
+
+function onSliderInput() {
+  gainPct.textContent = gainSlider.value + '%';
+}
+
+function onOverrideToggle() {
+  gainSlider.disabled = !gainCheck.checked;
+  sendGain();
+}
+
+function sendGain() {
+  const active  = gainCheck.checked;
+  const value   = parseInt(gainSlider.value, 10);
+  gainStatus.textContent = 'Sending…';
+  fetch(`/gain?override=${active}&value=${value}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ override: active, value })
+  })
+  .then(r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
+  .then(data => {
+    gainStatus.textContent = data.gain_override_active
+      ? `Override active: ${data.gain_override_percent}%`
+      : 'Using physical potentiometer';
+  })
+  .catch(err => {
+    console.error("sendGain failed:", err);
+    gainStatus.textContent = 'Error communicating with device';
+  });
+}
+
+// Sync UI state from the device on page load
+fetch('/status')
+  .then(r => r.json())
+  .then(data => {
+    if (data.gain_override_active) {
+      gainCheck.checked = true;
+      gainSlider.disabled = false;
+      gainSlider.value = data.gain_override_percent;
+      gainPct.textContent = data.gain_override_percent + '%';
+      gainStatus.textContent = `Override active: ${data.gain_override_percent}%`;
+    } else {
+      gainCheck.checked = false;
+      gainSlider.disabled = true;
+      if (data.gain_percent !== undefined) {
+        gainSlider.value = data.gain_percent;
+        gainPct.textContent = data.gain_percent + '%';
+        gainStatus.textContent = `Potentiometer: ${data.gain_percent}%`;
+      }
+    }
+  })
+  .catch(() => {});
 </script>
 </body>
 </html>
