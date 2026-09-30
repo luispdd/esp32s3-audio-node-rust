@@ -109,6 +109,14 @@ While listening to the live audio stream in a browser, users may find the volume
 - The override persists in memory until the user unchecks the checkbox on the web page or the board reboots, at which point the device immediately falls back to the physical potentiometer.
 
 **Alternative considered:** persisting the web override to NVS flash across reboots. Rejected because the physical potentiometer is the hardware source of truth on boot; storing override across power cycles could result in confusing silent or high-gain states upon restart.
+ 
+### 10. Onboard RGB LED (GPIO 38) boot status indicator
+The Waveshare ESP32-S3-WROOM-1-N8R8 development board includes an addressable WS2812 RGB LED tied to GPIO 38. Upon initial power-on or hardware reset, the default boot state or hardware pull can leave the LED glowing red. To provide clear visual feedback during startup and keep the board unobtrusive during operation:
+- The firmware manages GPIO 38 via the ESP32-S3 RMT (Remote Control) peripheral (`TxChannelDriver` with `BytesEncoder` configured for WS2812 pulse timings).
+- At the start of `App::run`, the LED is initialized and immediately set to blue (`[0, 0, 64]`) to indicate ongoing hardware, Wi-Fi, audio buffer, and peripheral initialization.
+- As soon as all subsystems are initialized and before entering the main loop, the LED is turned completely off (`[0, 0, 0]`).
+
+**Alternative considered:** using external crates like `ws2812-esp32-rmt-driver`. Rejected due to crate dependency conflicts with the patched `esp-idf-hal 0.47`; a lightweight RMT driver in `src/led.rs` using standard ESP-IDF RMT primitives keeps dependencies minimal and rock-solid.
 
 ## Risks / Trade-offs
 

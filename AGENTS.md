@@ -36,6 +36,7 @@ This document provides essential instructions, hardware constraints, toolchain d
 | **Button 1 (Mode)** | IN | **GPIO 5** | Active-low, internal pull-up. Short press: cycle mode. Long press: screen power toggle. |
 | **Button 2 (Rec)** | IN | **GPIO 6** | Active-low, internal pull-up. |
 | **Button 3 (Other)**| IN | **GPIO 7** | Active-low, internal pull-up. |
+| **RGB LED (WS2812)**| DATA | **GPIO 38** | Onboard addressable LED (RMT driver). Blue during boot, off after boot. |
 
 ---
 
@@ -89,6 +90,7 @@ src/
 ├── sd.rs           # MicroSD card lifecycle, probing, and FATFS file system mounting
 ├── network.rs      # Local Wi-Fi connection and credentials loader
 ├── potentiometer.rs# ADC1_CH3 potentiometer driver & linear software gain mapping
+├── led.rs          # Onboard WS2812 RGB LED driver (RMT), boot indicator
 └── audio/
     ├── mod.rs      # Audio module root
     ├── frame.rs    # AudioFrame data structures
@@ -125,6 +127,9 @@ src/
 9. **Potentiometer & ADC Gain Control (`src/potentiometer.rs`):**
    - Use `Potentiometer::new(adc1, pins.gpio4)` to initialize the 12-bit oneshot ADC driver on `ADC1` (`ADCCH3<ADCU1>`, attenuation `DB_12`).
    - Poll `pot.read_gain()` inside the Core 1 audio capture loop (each 20ms frame). Raw ADC values map linearly: deadband (`raw <= 40`) produces `0.0` (silence), full scale (`4095`) produces `4.0x` max gain, and intermediate values scale proportionally.
+10. **Onboard RGB LED (`src/led.rs`):**
+   - The onboard WS2812 RGB LED is connected to **GPIO 38** and driven via the RMT peripheral using `RgbLed::new(pins.gpio38)`.
+   - It is set to Blue (`set_booting()`) as soon as `App::run` begins, and turned off (`turn_off()`) once all subsystems (Wi-Fi, I2C, SD, Audio, HTTP servers) have finished initializing before entering the main polling loop.
 
 ---
 

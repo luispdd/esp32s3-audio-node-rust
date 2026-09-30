@@ -48,6 +48,19 @@ impl App {
             adc1,
             ..
         } = peripherals;
+
+        #[cfg(target_arch = "xtensa")]
+        let mut rgb_led = crate::led::RgbLed::new(pins.gpio38);
+        #[cfg(not(target_arch = "xtensa"))]
+        let mut rgb_led = crate::led::RgbLed::new();
+
+        if let Ok(ref mut led) = rgb_led {
+            log::info!("RGB LED initialized on GPIO 38: Booting state (Blue)");
+            let _ = led.set_booting();
+        } else if let Err(ref err) = rgb_led {
+            log::warn!("RGB LED initialization on GPIO 38: {err}");
+        }
+
         let sys_loop = esp_idf_svc::eventloop::EspSystemEventLoop::take()
             .map_err(|err| format!("failed to take system event loop: {err}"))?;
         let nvs = esp_idf_svc::nvs::EspDefaultNvsPartition::take()
@@ -254,6 +267,12 @@ impl App {
         log::info!("Other button (Button 3) configured on GPIO 7 with internal pull-up enabled.");
         log::info!("PIR sensor input configured on GPIO 3 with pull-down enabled.");
         log::info!("Potentiometer configured on GPIO 4 (ADC1_CH3) controlling microphone gain in real time.");
+
+        // Boot process complete: turn off the onboard RGB LED
+        if let Ok(ref mut led) = rgb_led {
+            log::info!("Boot process finished: turning off RGB LED");
+            let _ = led.turn_off();
+        }
 
         loop {
             let pressed = mode_button.is_low();

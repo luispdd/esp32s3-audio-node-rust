@@ -15,6 +15,7 @@ This proposal follows the hardware baseline defined in the project’s initial s
 - Implement a device mode system (STATUS_MODE, LIVE_MODE, SD_MODE) driven by Button 1 (GPIO 5), with a dedicated OLED display layout per mode, short-press mode rotation, and long-press display power toggling (off/on).
 - Extract screen management into `src/display.rs` and SD card management into `src/sd.rs` to maintain a clean, extensible module boundary as the codebase grows.
 - Add web-based gain override controls to the browser live stream player (a checkbox to enable override and a slider to set 0–100% gain) so listeners can adjust audio level remotely without touching the physical board, persisting in memory until unchecked or board restart.
+- Control the onboard WS2812 RGB LED on GPIO 38: illuminate blue during hardware and network initialization, then turn off completely once the boot process finishes.
 
 ## Capabilities
 

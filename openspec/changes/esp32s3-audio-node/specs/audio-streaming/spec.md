@@ -110,3 +110,15 @@ The system SHALL allow a browser user to override the physical potentiometer gai
 - **WHEN** the device restarts
 - **THEN** the system SHALL initialize with the gain override disabled, defaulting to the physical potentiometer reading
 
+### Requirement: Onboard RGB LED indicates boot status
+The system SHALL control the onboard WS2812 RGB LED (GPIO 38) to display blue during the boot sequence and turn off completely after initialization completes.
+
+#### Scenario: Device starts up
+- **WHEN** the device powers on or reboots and begins subsystem initialization
+- **THEN** the system SHALL set the onboard RGB LED to blue
+
+#### Scenario: Initialization finishes
+- **WHEN** all hardware and network initialization completes and the main application loop begins
+- **THEN** the system SHALL turn off the onboard RGB LED
+
+

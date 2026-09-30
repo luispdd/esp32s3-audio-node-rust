@@ -3,6 +3,7 @@ pub mod audio;
 mod config;
 mod credential;
 pub mod display;
+pub mod led;
 pub mod modes;
 mod network;
 pub mod potentiometer;
