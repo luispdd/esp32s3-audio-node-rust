@@ -66,6 +66,8 @@ pub struct Microphone<'a> {
     driver: I2sDriver<'a, I2sRx>,
     last_signal_detected: bool,
     current_gain: f32,
+    #[cfg(target_arch = "xtensa")]
+    raw_buffer: Vec<u8>,
     #[cfg(not(target_arch = "xtensa"))]
     _phantom: std::marker::PhantomData<&'a ()>,
     #[cfg(not(target_arch = "xtensa"))]
@@ -94,6 +96,7 @@ impl<'a> Microphone<'a> {
             driver,
             last_signal_detected: false,
             current_gain: 1.0,
+            raw_buffer: Vec::with_capacity(320 * 8),
         };
 
         // Perform initial hardware read to verify communication
@@ -125,10 +128,15 @@ impl<'a> Microphone<'a> {
     ) -> Result<AudioFrame, String> {
         // In 32-bit stereo mode, each sample needs 8 bytes from I2S
         let raw_len = samples_count * 8;
-        let mut raw_buf = vec![0u8; raw_len];
+        if self.raw_buffer.len() < raw_len {
+            self.raw_buffer.resize(raw_len, 0);
+        }
 
-        let bytes_read = self.read_samples(&mut raw_buf, timeout_ticks)?;
-        let pcm_samples = convert_i2s_bytes_to_pcm16_with_gain(&raw_buf[..bytes_read], gain);
+        let bytes_read = self
+            .driver
+            .read(&mut self.raw_buffer[..raw_len], timeout_ticks)
+            .map_err(|err| format!("I2S read failed: {err}"))?;
+        let pcm_samples = convert_i2s_bytes_to_pcm16_with_gain(&self.raw_buffer[..bytes_read], gain);
 
         let signal_present = pcm_samples.iter().any(|&s| s.abs() > 300);
         self.last_signal_detected = signal_present;

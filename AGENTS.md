@@ -167,6 +167,25 @@ src/
     - `SD_MODE` prefixes the list with `[Record new]` at index 0. Existing recordings map to `files[selected_index - 1]`.
 15. **Synchronous Worker Finalization (`src/audio/recorder.rs`):**
     - `RecordingController::stop()` and `cancel()` must block with a bounded loop (`while self.is_recording() && ...`) to guarantee the Core 0 worker thread finishes flushing, updates WAV headers, and closes file handles before the caller refreshes directory metadata (`card.inspect()`) or updates display state.
+16. **PIR Mode & Motion-Triggered Recording Lifecycle (`src/modes.rs`, `src/app.rs`):**
+    - `PIR_MODE` operates as the 4th device mode in cyclic sequence: `STATUS_MODE` -> `LIVE_MODE` -> `SD_MODE` -> `PIR_MODE` -> `STATUS_MODE`.
+    - Managed by `PirButtonController`:
+      - Short press on Button 2 (GPIO 7) initiates a 10-second arming delay (`PirOperationalState::Arming`), ignoring motion.
+      - After 10 seconds elapse, transitions to `PirOperationalState::Armed` (monitoring active).
+      - Motion detected by the PIR sensor (GPIO 3, active-high) while armed immediately triggers standard WAV recording to `/sdcard/audio/YYYYMMDD_HHMMSS.wav`.
+      - Recording is maintained for 20 seconds (`DEFAULT_RECORDING_DURATION`) from the latest motion event, dynamically resetting the 20-second countdown each time new movement is detected by the PIR sensor.
+      - Once 20 seconds elapse with no motion, cleanly finalizes the WAV recording via `recording_controller.stop()` and automatically returns to `PirOperationalState::Armed` (ready for the next motion event).
+      - Short press on Button 2 while arming, armed, or recording immediately disarms the controller back to `Idle` (and stops/finalizes any active recording).
+      - Short press on Button 1 (mode switch) disarms the controller and finalizes recording.
+      - Long press on Button 1 toggles OLED display sleep/wake while motion monitoring and recording continue running unaffected in the background.
+17. **Buffer Sizing, Pre-roll & SD Read Tuning (`src/audio/stream.rs`):**
+    - `DEFAULT_BUFFER_CAPACITY = 150` frames (150 frames * 20ms = 3,000ms = 3 seconds) in `SharedAudioBuffer`. This absorbs MicroSD cluster allocation latency and SPI bus contention without audio drops.
+    - Live audio streaming pre-roll: `/stream.wav` client connection initializes `last_seq = stream_buffer.current_seq().saturating_sub(10)` (10 frames = 200ms pre-roll) to prime client audio buffers and prevent initial buffer underrun clicks while maintaining low ~200ms latency.
+    - SD file streaming chunk size: `/recordings/{filename}` uses a 4,096-byte chunk buffer (`vec![0u8; 4096]`) instead of 1,024 bytes, reducing filesystem read overhead and improving HTTP streaming throughput over Wi-Fi.
+18. **Atomic Cross-Core State Synchronization for Web & REST APIs (`src/audio/stream.rs`):**
+    - Real-time device state (device mode, PIR state, arming countdown, motion sensor state, recording countdown) is mirrored to `SharedAudioBuffer` via lock-free atomic variables (`AtomicU8`, `AtomicBool`).
+    - Core 1 updates them without blocking or mutex contention on each loop tick; Core 0 HTTP handlers (`GET /status`, `GET /api/pir`) read snapshots instantaneously.
+    - Dedicated REST endpoint `GET /api/pir` and status fields in `GET /status` reflect `device_mode`, `pir_state`, `pir_armed`, `pir_arming_countdown`, `pir_motion_detected`, and `pir_recording_remaining_secs`.
 
 ---
 

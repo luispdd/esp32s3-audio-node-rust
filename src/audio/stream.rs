@@ -160,9 +160,13 @@ pub struct PirStatusSnapshot {
     pub recording_remaining_secs: Option<u8>,
 }
 
+/// Default buffer capacity in frames (150 frames * 20ms = 3,000ms = 3 seconds).
+/// Absorbs MicroSD cluster allocation latency and SPI bus contention without audio drops.
+pub const DEFAULT_BUFFER_CAPACITY: usize = 150;
+
 impl SharedAudioBuffer {
     pub fn new(capacity: usize) -> Self {
-        let cap = if capacity == 0 { 50 } else { capacity };
+        let cap = if capacity == 0 { DEFAULT_BUFFER_CAPACITY } else { capacity };
         Self {
             inner: Arc::new(AudioBufferInner {
                 state: Mutex::new(AudioBufferState {
@@ -185,6 +189,26 @@ impl SharedAudioBuffer {
                 pir_recording_remaining_secs: AtomicU8::new(0),
             }),
         }
+    }
+
+    /// Returns the latest monotonic sequence ID produced in the buffer.
+    pub fn current_seq(&self) -> u64 {
+        self.inner.state.lock().unwrap().seq
+    }
+
+    /// Returns the capacity of the buffer in frames.
+    pub fn capacity(&self) -> usize {
+        self.inner.state.lock().unwrap().capacity
+    }
+
+    /// Returns the current number of frames stored in the ring buffer.
+    pub fn len(&self) -> usize {
+        self.inner.state.lock().unwrap().frames.len()
+    }
+
+    /// Checks if the buffer contains no frames.
+    pub fn is_empty(&self) -> bool {
+        self.inner.state.lock().unwrap().frames.is_empty()
     }
 
     /// Pushes a newly captured audio frame into the buffer.
@@ -844,7 +868,7 @@ impl LiveAudioStream {
                 ];
 
                 let mut resp = req.into_response(200, Some("OK"), &headers)?;
-                let mut buf = [0u8; 1024];
+                let mut buf = vec![0u8; 4096];
                 loop {
                     use std::io::Read;
                     match file.read(&mut buf) {
@@ -992,7 +1016,9 @@ impl LiveAudioStream {
             let wav_header = create_wav_header(16_000, 1, 16, 0x7fff_ffff);
             resp.write_all(&wav_header)?;
 
-            let mut last_seq = 0u64;
+            // Start stream with a small pre-roll (10 frames = 200ms) to prime
+            // the client's audio buffer while keeping live latency low (~200ms).
+            let mut last_seq = stream_buffer.current_seq().saturating_sub(10);
 
             loop {
                 let (frames, new_seq) = stream_buffer.fetch_frames(last_seq, Duration::from_millis(200));
@@ -1025,7 +1051,8 @@ impl LiveAudioStream {
             let wav_header = create_wav_header(16_000, 1, 16, 0x7fff_ffff);
             resp.write_all(&wav_header)?;
 
-            let mut last_seq = 0u64;
+            // Start stream with a small pre-roll (10 frames = 200ms)
+            let mut last_seq = main_fallback_buffer.current_seq().saturating_sub(10);
 
             loop {
                 let (frames, new_seq) = main_fallback_buffer.fetch_frames(last_seq, Duration::from_millis(200));
@@ -1283,5 +1310,21 @@ mod tests {
         assert_eq!(armed_rec.arming_countdown, None);
         assert!(armed_rec.motion_detected);
         assert_eq!(armed_rec.recording_remaining_secs, Some(19));
+    }
+
+    #[test]
+    fn shared_audio_buffer_sequence_and_capacity_tracking() {
+        let buffer = SharedAudioBuffer::new(0); // 0 defaults to DEFAULT_BUFFER_CAPACITY
+        assert_eq!(buffer.capacity(), DEFAULT_BUFFER_CAPACITY);
+        assert_eq!(buffer.current_seq(), 0);
+        assert!(buffer.is_empty());
+        assert_eq!(buffer.len(), 0);
+
+        let frame = AudioFrame::new(16_000, 1, vec![500; 320]);
+        buffer.push_frame(frame);
+
+        assert_eq!(buffer.current_seq(), 1);
+        assert_eq!(buffer.len(), 1);
+        assert!(!buffer.is_empty());
     }
 }

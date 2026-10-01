@@ -125,7 +125,7 @@ impl App {
             }
         };
 
-        let audio_buffer = crate::audio::SharedAudioBuffer::new(50);
+        let audio_buffer = crate::audio::SharedAudioBuffer::new(crate::audio::DEFAULT_BUFFER_CAPACITY);
 
         #[cfg(target_arch = "xtensa")]
         let mut potentiometer = crate::potentiometer::Potentiometer::new(adc1, pins.gpio4);

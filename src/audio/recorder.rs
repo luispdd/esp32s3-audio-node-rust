@@ -317,8 +317,8 @@ fn run_recorder_worker(
         }
     };
 
-    // Buffer writes to optimize SD card sector throughput
-    let buffered_file = BufWriter::with_capacity(1024, file);
+    // Buffer writes to optimize SD card sector throughput (4096 bytes aligns with SPI DMA)
+    let buffered_file = BufWriter::with_capacity(4096, file);
     let mut writer = match WavWriter::new(buffered_file, 16000, 1) {
         Ok(w) => w,
         Err(e) => {
@@ -331,7 +331,9 @@ fn run_recorder_worker(
     };
 
     let start_instant = Instant::now();
-    let mut last_seq: u64 = 0;
+    // Start recording from current sequence with a 5-frame (100ms) pre-roll
+    // so sound transients at trigger time are captured without recording seconds of stale audio.
+    let mut last_seq: u64 = buffer.current_seq().saturating_sub(5);
     let mut total_frames: u32 = 0;
 
     loop {

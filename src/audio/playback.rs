@@ -1,10 +1,10 @@
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::frame::AudioFrame;
 use super::stream::SharedAudioBuffer;
@@ -159,11 +159,17 @@ impl PlaybackController {
         let worker = move || {
             log::info!("Audio playback worker started for {fname_clone} ({total_secs}s)");
 
+            // Buffer reads using 4096 bytes to align with SPI DMA and minimize SD bus traffic
+            let mut reader = BufReader::with_capacity(4096, file);
+
             // Buffer for 20ms of 16 kHz 16-bit mono PCM: 320 samples * 2 bytes = 640 bytes
             let frame_sample_count = 320usize;
             let frame_byte_count = frame_sample_count * 2;
             let mut raw_buf = vec![0u8; frame_byte_count];
             let mut bytes_played: u64 = 0;
+
+            let frame_duration = Duration::from_millis(20);
+            let mut next_tick = Instant::now();
 
             loop {
                 if shared_clone.stop_flag.load(Ordering::SeqCst) {
@@ -171,7 +177,7 @@ impl PlaybackController {
                     break;
                 }
 
-                let bytes_read = match file.read(&mut raw_buf) {
+                let bytes_read = match reader.read(&mut raw_buf) {
                     Ok(0) => {
                         log::info!("Playback reached end of file: {fname_clone}");
                         break;
@@ -208,7 +214,13 @@ impl PlaybackController {
                     }
                 }
 
-                thread::sleep(Duration::from_millis(20));
+                next_tick += frame_duration;
+                let now = Instant::now();
+                if next_tick > now {
+                    thread::sleep(next_tick - now);
+                } else {
+                    next_tick = now;
+                }
             }
 
             {
