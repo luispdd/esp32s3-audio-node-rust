@@ -612,12 +612,17 @@ impl LiveAudioStream {
                 let noise_level = status_buffer.current_noise_level();
                 let noise_threshold = crate::audio::get_noise_threshold();
                 let sound_detected = status_buffer.is_noise_above(noise_threshold);
+                let now = crate::time::UtcDateTime::now();
+                let time_str = now.format_iso();
+                let ntp_synced = now.is_valid_ntp_year();
+                let sd_mounted = crate::sd::check_sd_card_is_writable();
                 let body = format!(
-                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"noise_level":{},"noise_threshold":{},"sound_detected":{},"device_mode":"{}","pir_state":"{}","pir_armed":{},"pir_arming_countdown":{},"pir_motion_detected":{},"pir_recording_remaining_secs":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{},"playback":{},"playback_filename":"{}","playback_duration":{},"playback_total":{}}}"#,
+                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"noise_level":{},"noise_threshold":{},"sound_detected":{},"device_mode":"{}","pir_state":"{}","pir_armed":{},"pir_arming_countdown":{},"pir_motion_detected":{},"pir_recording_remaining_secs":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{},"playback":{},"playback_filename":"{}","playback_duration":{},"playback_total":{},"system_time":"{}","ntp_synced":{},"sd_mounted":{}}}"#,
                     signal, listeners, gain_percent, override_active, override_percent,
                     noise_level, noise_threshold, sound_detected,
                     pir.mode, pir.state, pir.armed, pir_arming_cd_str, pir.motion_detected, pir_rec_rem_str,
-                    is_rec, rec_fn, rec_dur, rec_frames, is_play, pb_fn, pb_dur, pb_total
+                    is_rec, rec_fn, rec_dur, rec_frames, is_play, pb_fn, pb_dur, pb_total,
+                    time_str, ntp_synced, sd_mounted
                 );
                 let headers = [
                     ("Content-Type", "application/json"),

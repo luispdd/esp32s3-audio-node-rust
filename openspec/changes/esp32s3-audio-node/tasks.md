@@ -68,5 +68,5 @@
 ## 7. Hardening and Polish
 
 - [x] 7.1 Tune buffer sizes, latency, and reliability for real-world device operation and verify stable behavior under sustained use
-- [ ] 7.2 Improve status reporting and user feedback on the OLED or browser UI and verify the system remains understandable during operation
-- [ ] 7.3 Review the device behavior against the full-feature scope and identify future improvements for refinement in later iterations
+- [x] 7.2 Improve status reporting and user feedback on the OLED or browser UI and verify the system remains understandable during operation
+- [x] 7.3 Review the device behavior against the full-feature scope and identify future improvements for refinement in later iterations

@@ -234,10 +234,13 @@ audio {
 <body>
 <div class="card">
   <div class="header">
-    <h1>Audio Node</h1>
+    <div>
+      <h1>Audio Node</h1>
+      <div id="lastSync" style="font-size: 0.7rem; color: #8b949e; margin-top: 2px;">Connecting...</div>
+    </div>
     <div style="display: flex; gap: 0.5rem; align-items: center;">
-      <button onclick="refreshStatus()" class="btn-sm" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; cursor: pointer;">↻ Refresh</button>
-      <div class="badge"><span class="pulse"></span> LIVE</div>
+      <button id="refreshBtn" onclick="refreshStatus()" class="btn-sm" style="background: #21262d; border: 1px solid #30363d; color: #c9d1d9; cursor: pointer;">↻ Refresh</button>
+      <div class="badge" id="connBadge"><span class="pulse"></span> LIVE</div>
     </div>
   </div>
   <div class="info-grid">
@@ -254,9 +257,22 @@ audio {
       <div class="info-value">INMP441 (I2S)</div>
     </div>
     <div class="info-box">
-      <div class="info-label">Endpoint</div>
-      <div class="info-value" id="endpointInfo">:8080/stream.wav</div>
+      <div class="info-label">Active Listeners</div>
+      <div class="info-value" id="listenersVal">0 active</div>
     </div>
+    <div class="info-box">
+      <div class="info-label">System Time (UTC)</div>
+      <div class="info-value" id="systemTimeVal" style="font-size: 0.8rem; font-family: monospace;">Syncing...</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">MicroSD Storage</div>
+      <div class="info-value" id="sdStatusVal">Checking...</div>
+    </div>
+  </div>
+
+  <div id="onDevicePlaybackBanner" style="display: none; padding: 0.75rem; background: rgba(56, 139, 253, 0.12); border: 1px solid #388bfd; border-radius: 8px; margin-bottom: 1.25rem; font-size: 0.8rem; color: #58a6ff;">
+    <strong>▶ On-device playback active:</strong> <span id="onDevicePbText"></span><br>
+    <span style="color: #8b949e; font-size: 0.75rem;">Microphone input muted while playback is streaming.</span>
   </div>
 
   <canvas id="viz"></canvas>
@@ -522,29 +538,6 @@ function sendGain() {
   });
 }
 
-// Sync UI state from the device on page load
-fetch('/status')
-  .then(r => r.json())
-  .then(data => {
-    if (data.gain_override_active) {
-      gainCheck.checked = true;
-      gainSlider.disabled = false;
-      gainSlider.value = data.gain_override_percent;
-      gainPct.textContent = data.gain_override_percent + '%';
-      gainStatus.textContent = `Override active: ${data.gain_override_percent}%`;
-    } else {
-      gainCheck.checked = false;
-      gainSlider.disabled = true;
-      if (data.gain_percent !== undefined) {
-        gainSlider.value = data.gain_percent;
-        gainPct.textContent = data.gain_percent + '%';
-        gainStatus.textContent = `Potentiometer: ${data.gain_percent}%`;
-      }
-    }
-    updateRecordingStatus(data);
-  })
-  .catch(() => {});
-
 // ── SD Card Recording Controls ──────────────────────────────────────────────
 const startRecBtn   = document.getElementById('startRecBtn');
 const stopRecBtn    = document.getElementById('stopRecBtn');
@@ -694,26 +687,93 @@ function playRecording(filename) {
 
 function deleteRecording(filename) {
   if (!confirm(`Delete recording "${filename}"?`)) return;
+  recStatus.textContent = `Deleting ${filename}…`;
+  recStatus.style.color = '#58a6ff';
   fetch(`/api/recordings?filename=${encodeURIComponent(filename)}`, { method: 'DELETE' })
     .then(r => r.json())
     .then(data => {
       if (data.status === 'ok') {
+        recStatus.textContent = `Deleted: ${filename}`;
+        recStatus.style.color = '#3fb950';
         if (playAudio.src.includes(filename)) {
           playAudio.pause();
           playContainer.style.display = 'none';
         }
         fetchRecordings();
+        setTimeout(() => {
+          if (recStatus.textContent.startsWith('Deleted:')) {
+            recStatus.textContent = 'Idle';
+            recStatus.style.color = '#8b949e';
+          }
+        }, 3000);
       } else {
-        alert('Delete failed: ' + (data.message || 'unknown error'));
+        recStatus.textContent = 'Delete failed: ' + (data.message || 'unknown error');
+        recStatus.style.color = '#f85149';
       }
     })
-    .catch(err => alert('Failed to send delete request'));
+    .catch(err => {
+      recStatus.textContent = 'Failed to send delete request';
+      recStatus.style.color = '#f85149';
+    });
 }
 
 function refreshStatus() {
+  const refreshBtn = document.getElementById('refreshBtn');
+  const connBadge = document.getElementById('connBadge');
+  const lastSync = document.getElementById('lastSync');
+  if (refreshBtn) refreshBtn.textContent = '↻ Syncing…';
+
   fetch('/status')
-    .then(r => r.json())
+    .then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
     .then(data => {
+      if (refreshBtn) refreshBtn.textContent = '↻ Refresh';
+      if (connBadge) {
+        connBadge.style.background = 'rgba(35, 134, 54, 0.2)';
+        connBadge.style.color = '#3fb950';
+        connBadge.style.borderColor = '#238636';
+        connBadge.innerHTML = '<span class="pulse"></span> LIVE';
+      }
+      if (lastSync) {
+        const timeNow = new Date().toLocaleTimeString();
+        lastSync.textContent = `Updated ${timeNow}`;
+        lastSync.style.color = '#8b949e';
+      }
+
+      if (data.listeners !== undefined) {
+        const el = document.getElementById('listenersVal');
+        if (el) el.textContent = `${data.listeners} active`;
+      }
+      if (data.system_time) {
+        const el = document.getElementById('systemTimeVal');
+        if (el) {
+          el.textContent = data.system_time;
+          el.title = data.ntp_synced ? 'NTP synchronized' : 'Internal clock (pre-sync)';
+        }
+      }
+      if (data.sd_mounted !== undefined) {
+        const el = document.getElementById('sdStatusVal');
+        if (el) {
+          el.textContent = data.sd_mounted ? 'Mounted (/audio)' : 'Unavailable';
+          el.style.color = data.sd_mounted ? '#3fb950' : '#f85149';
+        }
+      }
+
+      const pbBanner = document.getElementById('onDevicePlaybackBanner');
+      const pbText = document.getElementById('onDevicePbText');
+      if (pbBanner && pbText) {
+        if (data.playback) {
+          pbBanner.style.display = 'block';
+          const cur = formatDuration(data.playback_duration || 0);
+          const tot = formatDuration(data.playback_total || 0);
+          pbText.textContent = `${data.playback_filename} (${cur} / ${tot})`;
+        } else {
+          pbBanner.style.display = 'none';
+        }
+      }
+
       if (data.gain_override_active !== undefined) {
         if (data.gain_override_active) {
           gainCheck.checked = true;
@@ -734,7 +794,20 @@ function refreshStatus() {
       updateRecordingStatus(data);
       updatePirStatus(data);
     })
-    .catch(() => {});
+    .catch(err => {
+      console.warn("Status refresh failed:", err);
+      if (refreshBtn) refreshBtn.textContent = '↻ Retry';
+      if (connBadge) {
+        connBadge.style.background = 'rgba(218, 54, 51, 0.2)';
+        connBadge.style.color = '#f85149';
+        connBadge.style.borderColor = '#da3633';
+        connBadge.textContent = 'OFFLINE';
+      }
+      if (lastSync) {
+        lastSync.textContent = 'Connection error';
+        lastSync.style.color = '#f85149';
+      }
+    });
   fetchRecordings();
 }
 

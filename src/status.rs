@@ -35,6 +35,7 @@ pub struct SystemStatus {
     pub playback: Option<ActivePlaybackInfo>,
     pub selected_file_index: usize,
     pub pir_mode: PirModeStatus,
+    pub listeners: usize,
 }
 
 impl SystemStatus {
@@ -52,6 +53,7 @@ impl SystemStatus {
             playback: None,
             selected_file_index: 0,
             pir_mode: PirModeStatus::default(),
+            listeners: 0,
         }
     }
 
@@ -81,6 +83,11 @@ impl SystemStatus {
         self
     }
 
+    pub fn with_listeners(mut self, listeners: usize) -> Self {
+        self.listeners = listeners;
+        self
+    }
+
     pub fn from_runtime(wifi_connected: bool) -> Self {
         let is_writable = check_sd_card_is_writable();
         let sd_card = if is_writable {
@@ -102,6 +109,7 @@ impl SystemStatus {
             playback: None,
             selected_file_index: 0,
             pir_mode: PirModeStatus::default(),
+            listeners: 0,
         }
     }
 
@@ -125,6 +133,7 @@ impl SystemStatus {
             playback: None,
             selected_file_index: 0,
             pir_mode: PirModeStatus::default(),
+            listeners: 0,
         }
     }
 
@@ -178,6 +187,7 @@ mod tests {
             playback: None,
             selected_file_index: 0,
             pir_mode: PirModeStatus::default(),
+            listeners: 0,
         };
 
         let summary = status.summary_lines();

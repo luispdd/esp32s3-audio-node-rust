@@ -171,8 +171,24 @@ where
     D: DrawTarget<Color = BinaryColor>,
     D::Error: core::fmt::Debug,
 {
+    let header = if let Some(ref rec) = status.recording {
+        let mins = rec.duration_secs / 60;
+        let secs = rec.duration_secs % 60;
+        format!("STATUS [REC {:02}:{:02}]", mins, secs)
+    } else if let Some(ref pb) = status.playback {
+        let mins = pb.duration_secs / 60;
+        let secs = pb.duration_secs % 60;
+        format!("STATUS [PLAY {:02}:{:02}]", mins, secs)
+    } else if status.pir_mode.armed {
+        "STATUS [ARMED]".to_string()
+    } else if let Some(cd) = status.pir_mode.arming_countdown {
+        format!("STATUS [ARM {:02}s]", cd)
+    } else {
+        DeviceMode::Status.as_str().to_string()
+    };
+
     Text::with_baseline(
-        DeviceMode::Status.as_str(),
+        header.as_str(),
         Point::new(MARGIN_LEFT, MARGIN_TOP),
         text_style,
         Baseline::Top,
@@ -212,8 +228,20 @@ where
     D: DrawTarget<Color = BinaryColor>,
     D::Error: core::fmt::Debug,
 {
+    let header = if let Some(ref rec) = status.recording {
+        let mins = rec.duration_secs / 60;
+        let secs = rec.duration_secs % 60;
+        format!("LIVE [REC {:02}:{:02}]", mins, secs)
+    } else if let Some(ref pb) = status.playback {
+        let mins = pb.duration_secs / 60;
+        let secs = pb.duration_secs % 60;
+        format!("LIVE [PLAY {:02}:{:02}]", mins, secs)
+    } else {
+        DeviceMode::Live.as_str().to_string()
+    };
+
     Text::with_baseline(
-        DeviceMode::Live.as_str(),
+        header.as_str(),
         Point::new(MARGIN_LEFT, MARGIN_TOP),
         text_style,
         Baseline::Top,
@@ -231,15 +259,18 @@ where
     .draw(display)
     .map_err(|_| "failed to draw live IP line".to_string())?;
 
-    let noise_line = format!("Noise: {}%  Gain: {}%", status.noise_level, status.gain_percent);
+    let status_line = format!(
+        "N:{}% G:{}% L:{}",
+        status.noise_level, status.gain_percent, status.listeners
+    );
     Text::with_baseline(
-        noise_line.as_str(),
+        status_line.as_str(),
         Point::new(MARGIN_LEFT, MARGIN_TOP + 20),
         text_style,
         Baseline::Top,
     )
     .draw(display)
-    .map_err(|_| "failed to draw live noise line".to_string())?;
+    .map_err(|_| "failed to draw live audio status line".to_string())?;
 
     Ok(())
 }
@@ -270,7 +301,7 @@ where
         let mins = rec.duration_secs / 60;
         let secs = rec.duration_secs % 60;
         (
-            format!("{} [REC]", DeviceMode::Sd.as_str()),
+            "SD [REC] B2:Stop".to_string(),
             format!("{:02}:{:02} ({}f)", mins, secs, rec.frames_recorded),
             truncate_display_line(&rec.filename, 20),
         )
@@ -280,7 +311,7 @@ where
         let tot_m = pb.total_secs / 60;
         let tot_s = pb.total_secs % 60;
         (
-            format!("{} [PLAY]", DeviceMode::Sd.as_str()),
+            "SD [PLAY] B2:Stop".to_string(),
             format!("{:02}:{:02} / {:02}:{:02}", cur_m, cur_s, tot_m, tot_s),
             truncate_display_line(&format!("*{}", pb.filename), 20),
         )
@@ -291,55 +322,59 @@ where
                 "SD unavailable".to_string(),
                 "Card not mounted".to_string(),
             ),
-        SdCardStatus::FolderCreateFailed(err) => (
-            DeviceMode::Sd.as_str().to_string(),
-            "/audio create fail".to_string(),
-            truncate_display_line(err, 20),
-        ),
-        SdCardStatus::FolderMissing => (
-            DeviceMode::Sd.as_str().to_string(),
-            "/audio missing".to_string(),
-            "Folder not found".to_string(),
-        ),
-        SdCardStatus::Empty => (
-            format!("{} (1/1)", DeviceMode::Sd.as_str()),
-            "* [Record new]".to_string(),
-            " (No files)".to_string(),
-        ),
-        SdCardStatus::Files(files) => {
-            if files.is_empty() {
-                (
-                    format!("{} (1/1)", DeviceMode::Sd.as_str()),
-                    "* [Record new]".to_string(),
-                    " (No files)".to_string(),
-                )
-            } else {
-                let total_items = files.len() + 1;
-                let selected = status.selected_file_index.min(total_items.saturating_sub(1));
-                let header = format!("{} ({}/{})", DeviceMode::Sd.as_str(), selected + 1, total_items);
-                let (line1, line2) = if selected == 0 {
+            SdCardStatus::FolderCreateFailed(err) => (
+                DeviceMode::Sd.as_str().to_string(),
+                "/audio create fail".to_string(),
+                truncate_display_line(err, 20),
+            ),
+            SdCardStatus::FolderMissing => (
+                DeviceMode::Sd.as_str().to_string(),
+                "/audio missing".to_string(),
+                "Folder not found".to_string(),
+            ),
+            SdCardStatus::Empty => (
+                "SD (1/1) B2:Record".to_string(),
+                "* [Record new]".to_string(),
+                " (No files)".to_string(),
+            ),
+            SdCardStatus::Files(files) => {
+                if files.is_empty() {
                     (
+                        "SD (1/1) B2:Record".to_string(),
                         "* [Record new]".to_string(),
-                        format!(" {}", files[0]),
+                        " (No files)".to_string(),
                     )
                 } else {
-                    let file_idx = selected - 1;
-                    let l1 = format!("*{}", files[file_idx]);
-                    let l2 = if file_idx + 1 < files.len() {
-                        format!(" {}", files[file_idx + 1])
+                    let total_items = files.len() + 1;
+                    let selected = status.selected_file_index.min(total_items.saturating_sub(1));
+                    let (header, line1, line2) = if selected == 0 {
+                        (
+                            format!("SD (1/{total_items}) B2:Record"),
+                            "* [Record new]".to_string(),
+                            format!(" {}", files[0]),
+                        )
                     } else {
-                        " [Record new]".to_string()
+                        let file_idx = selected - 1;
+                        let l1 = format!("*{}", files[file_idx]);
+                        let l2 = if file_idx + 1 < files.len() {
+                            format!(" {}", files[file_idx + 1])
+                        } else {
+                            " [Record new]".to_string()
+                        };
+                        (
+                            format!("SD ({}/{}) B2:Play", selected + 1, total_items),
+                            l1,
+                            l2,
+                        )
                     };
-                    (l1, l2)
-                };
-                (
-                    header,
-                    truncate_display_line(&line1, 21),
-                    truncate_display_line(&line2, 21),
-                )
+                    (
+                        header,
+                        truncate_display_line(&line1, 21),
+                        truncate_display_line(&line2, 21),
+                    )
+                }
             }
         }
-    }
     };
 
     Text::with_baseline(
@@ -397,13 +432,13 @@ where
             (false, false) => "---",
         };
         (
-            format!("{} [REC]", DeviceMode::Pir.as_str()),
+            "PIR [REC] B2:Stop".to_string(),
             format!("{rem_str} [{act_tag}] N:{noise}%"),
             truncate_display_line(&rec.filename, 20),
         )
     } else if let Some(countdown) = status.pir_mode.arming_countdown {
         (
-            format!("{} [ARMING]", DeviceMode::Pir.as_str()),
+            "PIR [ARM] B2:Disarm".to_string(),
             format!("Arm in: {countdown}s"),
             format!("Noise: {noise}% (ign)"),
         )
@@ -419,7 +454,7 @@ where
             format!("Active  Noise:{noise}%")
         };
         (
-            format!("{} [ARMED]", DeviceMode::Pir.as_str()),
+            "PIR [ARMED] B2:Disarm".to_string(),
             motion_line.to_string(),
             active_line,
         )
@@ -430,9 +465,9 @@ where
             "PIR: CLEAR"
         };
         (
-            format!("{} [IDLE]", DeviceMode::Pir.as_str()),
+            "PIR [IDLE] B2:Arm".to_string(),
             format!("{pir_state}  N:{noise}%"),
-            "Btn2: Arm (10s delay)".to_string(),
+            "10s Arm Delay".to_string(),
         )
     };
 

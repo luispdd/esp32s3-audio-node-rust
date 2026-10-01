@@ -212,3 +212,26 @@ openspec instructions apply --change "esp32s3-audio-node" --json
   2. Verify compilation with `cargo test --no-run` and `cargo check --release`.
   3. Mark task complete in `tasks.md` (`- [x] X.Y ...`).
 - When updating plans or requirements, ensure `proposal.md`, `design.md`, `specs/audio-streaming/spec.md`, and `tasks.md` remain coherent, then run `openspec validate esp32s3-audio-node --json`.
+
+---
+
+## 5. Troubleshooting & Known Pitfalls
+
+### Cross-Core FreeRTOS File I/O & SD Bus Contention
+- **Problem / Symptom:** Calling FATFS operations (e.g. creating/closing files, seeking, writing) or modifying hardware state directly inside Core 0 HTTP request handlers causes random FreeRTOS task starvation, SPI timeouts, or `LoadStoreAlignment` hardware panics on Xtensa.
+- **Root Cause:** Core 0 HTTP handler threads run in lwIP/FreeRTOS network task context with stacks not guaranteed to meet FATFS 32-bit alignment constraints. Concurrently executing SPI3 operations while Core 1 audio loops are active corrupts hardware state.
+- **Solution:** Keep Core 0 HTTP request handlers completely non-blocking. Dispatch commands to Core 1 via lock-free atomic variables (`AtomicU8` using `swap(0, Ordering::SeqCst)`), and allow Core 1 to execute filesystem mutations and controller transitions synchronously within `App::run`.
+- **Verification:** Run `cargo test --no-run` to verify compilation, and verify non-blocking command dispatch via HTTP endpoints.
+
+### ESP-IDF HTTP Server Route Matching & Trailing Wildcard (`*`)
+- **Problem / Symptom:** Requests to registered endpoints return HTTP 404 or match incorrect handlers when query parameters (e.g. `?value=...`) or trailing slashes are included.
+- **Root Cause:** The `esp-idf-svc` HTTP server route registration matches URIs strictly. A route registered without a trailing `*` will fail to match if query parameters are appended.
+- **Solution:** Always register HTTP REST routes with a trailing asterisk (e.g. `/api/endpoint*`), explicitly verify `request.method()` inside the handler, and supply preflight `Method::Options` handlers for browser CORS.
+- **Verification:** Test endpoints using `curl -i -X POST http://<DEVICE_IP>/api/endpoint?value=10` and `curl -i -X OPTIONS http://<DEVICE_IP>/api/endpoint`.
+
+### Web Client Slider Overwrites During Status Polling
+- **Problem / Symptom:** Interactive range sliders (gain, thresholds) flicker or jump back to old values while the user is actively dragging them.
+- **Root Cause:** Asynchronous responses from `/status` polling overwrite `.value` on the slider element while touch or mouse dragging is in progress.
+- **Solution:** Track active dragging state (`isDragging = true` on `mousedown`/`touchstart`, `false` on `mouseup`/`touchend`). In status update callbacks, skip updating the slider value while active dragging is true.
+- **Verification:** Drag range sliders in the browser and verify smooth adjustment without value reset.
+

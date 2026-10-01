@@ -690,7 +690,8 @@ impl App {
                 .with_recording(active_rec)
                 .with_playback(active_pb)
                 .with_selected_file_index(selected_file_index)
-                .with_pir_mode(pir_status);
+                .with_pir_mode(pir_status)
+                .with_listeners(audio_buffer.active_listeners());
                 display.render(current_mode, &connection, &system_status)?;
             }
 
