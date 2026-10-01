@@ -327,6 +327,54 @@ impl App {
                 }
             }
 
+            // Check for pending PIR web commands
+            match audio_buffer.take_pir_command() {
+                1 => {
+                    // Start PIR_MODE: enter PIR_MODE and start 10s countdown immediately
+                    let previous_mode = current_mode;
+                    if current_mode != DeviceMode::Pir {
+                        if playback_controller.is_playing() {
+                            let _ = playback_controller.stop();
+                        }
+                        current_mode = DeviceMode::Pir;
+                        log::info!(
+                            "Web command: Switched mode from {} to PIR_MODE",
+                            previous_mode.as_str()
+                        );
+                    }
+                    pir_button_controller.start_arming(std::time::Instant::now());
+                    pir_was_armed = false;
+                    log::info!("Web command: PIR_MODE started - initiating 10-second arming countdown");
+                }
+                2 => {
+                    // Stop PIR_MODE: stop and store any ongoing recording, disarm, and exit PIR_MODE
+                    if current_mode == DeviceMode::Pir {
+                        if recording_controller.is_recording() {
+                            match recording_controller.stop() {
+                                Ok(filename) => {
+                                    log::info!("Web command: PIR recording stopped and saved: {filename}");
+                                    if let Ok(card) = &sd_card {
+                                        sd_status = card.inspect();
+                                    }
+                                }
+                                Err(err) => log::warn!("Web command: failed to stop PIR recording: {err}"),
+                            }
+                        }
+                        pir_button_controller.disarm();
+                        pir_was_armed = false;
+                        current_mode = DeviceMode::Status;
+                        log::info!("Web command: disarmed motion monitoring and exited PIR_MODE to STATUS_MODE");
+                    } else {
+                        if recording_controller.is_recording() {
+                            let _ = recording_controller.stop();
+                        }
+                        pir_button_controller.disarm();
+                        pir_was_armed = false;
+                    }
+                }
+                _ => {}
+            }
+
             let pressed = mode_button.is_low();
             match button_controller.update(pressed, display.is_on()) {
                 ModeButtonAction::CycleMode => {
@@ -367,6 +415,9 @@ impl App {
             let pir_detected = pir_sensor.is_high();
             let mic_detected = audio_buffer.is_signal_present();
             let gain_percent = audio_buffer.current_gain_percent();
+            let noise_level = audio_buffer.current_noise_level();
+            let noise_threshold = crate::audio::get_noise_threshold();
+            let sound_detected = audio_buffer.is_noise_above(noise_threshold);
 
             if current_mode == DeviceMode::Sd {
                 let is_rec = recording_controller.is_recording();
@@ -552,7 +603,12 @@ impl App {
                 pir_was_armed = pir_button_controller.is_armed();
 
                 let is_rec_now = recording_controller.is_recording();
-                let motion_action = pir_button_controller.handle_motion(pir_detected, is_rec_now, std::time::Instant::now());
+                let motion_action = pir_button_controller.handle_activity(
+                    pir_detected,
+                    sound_detected,
+                    is_rec_now,
+                    std::time::Instant::now(),
+                );
                 match motion_action {
                     PirMotionAction::StartRecording => {
                         if playback_controller.is_playing() {
@@ -621,6 +677,7 @@ impl App {
                     armed: pir_button_controller.is_armed(),
                     arming_countdown,
                     recording_remaining_secs: recording_remaining,
+                    sound_detected,
                 };
                 system_status = SystemStatus::from_runtime_with_sensors(
                     connection.connected,
@@ -629,6 +686,7 @@ impl App {
                     sd_status.clone(),
                     gain_percent,
                 )
+                .with_noise_level(noise_level, noise_threshold)
                 .with_recording(active_rec)
                 .with_playback(active_pb)
                 .with_selected_file_index(selected_file_index)
@@ -638,7 +696,7 @@ impl App {
 
             if !pressed {
                 log::info!(
-                    "Mode {} status (display {}): WiFi: {}, Mic: {}, PIR: {}, SD: {}, Gain: {}% [PIR: {}]",
+                    "Mode {} status (display {}): WiFi: {}, Mic: {}, PIR: {}, SD: {}, Gain: {}%, Noise: {}% (thr: {}%) [PIR: {}]",
                     current_mode.as_str(),
                     if display.is_on() { "ON" } else { "OFF" },
                     if connection.connected { "OK" } else { "KO" },
@@ -646,6 +704,8 @@ impl App {
                     if pir_detected { "ACTIVE" } else { "IDLE" },
                     if sd_status.is_mounted() { "OK" } else { "KO" },
                     gain_percent,
+                    noise_level,
+                    noise_threshold,
                     if pir_button_controller.is_armed() {
                         "ARMED"
                     } else if arming_countdown.is_some() {

@@ -305,6 +305,34 @@ audio {
       <div class="info-label">Auto-Recording</div>
       <div class="info-value" id="pirRecVal">Inactive</div>
     </div>
+    <div class="info-box" style="grid-column: span 2;">
+      <div class="info-label">Noise Level</div>
+      <div class="info-value" id="pirNoiseVal">0% (thr 25%)</div>
+    </div>
+  </div>
+
+  <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+    <button id="startPirBtn" onclick="startPirMode()" style="background: #238636; flex: 1;">▶ Start PIR Mode</button>
+    <button id="stopPirBtn" onclick="stopPirMode()" style="background: #da3633; flex: 1;">⏹ Stop & Exit PIR</button>
+  </div>
+  <div id="pirControlStatus" style="font-size: 0.8rem; color: #8b949e; margin-bottom: 1rem; min-height: 1.2rem;"></div>
+
+  <!-- Noise threshold override controls -->
+  <div class="gain-override" style="margin-top: 0;">
+    <div class="gain-override-header" style="justify-content: space-between;">
+      <label style="font-size: 0.85rem; font-weight: 600; color: #f0f6fc;">Noise Detection Threshold</label>
+      <span class="gain-label" id="thresholdPct" style="color: #58a6ff; font-weight: 600;">25%</span>
+    </div>
+    <div class="gain-slider-row">
+      <input type="range" id="thresholdSlider" min="1" max="100" value="25"
+             oninput="onThresholdInput()" onchange="sendNoiseThreshold()">
+    </div>
+    <div style="display: flex; gap: 0.35rem; margin-top: 0.25rem;">
+      <button type="button" class="btn-sm" style="flex: 1; background: #21262d; border: 1px solid #30363d; color: #c9d1d9;" onclick="setThresholdPreset(15)">15% (Quiet)</button>
+      <button type="button" class="btn-sm" style="flex: 1; background: #21262d; border: 1px solid #30363d; color: #c9d1d9;" onclick="setThresholdPreset(25)">25% (Default)</button>
+      <button type="button" class="btn-sm" style="flex: 1; background: #21262d; border: 1px solid #30363d; color: #c9d1d9;" onclick="setThresholdPreset(40)">40% (Loud)</button>
+    </div>
+    <div class="gain-status" id="thresholdStatus"></div>
   </div>
 </div>
 
@@ -785,7 +813,126 @@ function updatePirStatus(data) {
         pirRecEl.style.color = '#8b949e';
       }
     }
+
+    if (data.noise_level !== undefined) {
+      const pirNoiseEl = document.getElementById('pirNoiseVal');
+      if (pirNoiseEl) {
+        const thr = data.noise_threshold !== undefined ? data.noise_threshold : 25;
+        const snd = data.sound_detected ? ' [SOUND ACTIVE]' : '';
+        pirNoiseEl.textContent = `${data.noise_level}% (thr ${thr}%)${snd}`;
+        pirNoiseEl.style.color = data.sound_detected ? '#58a6ff' : '#e6edf3';
+      }
+    }
+
+    if (data.noise_threshold !== undefined && !isThresholdDragging) {
+      const tSlider = document.getElementById('thresholdSlider');
+      const tPct = document.getElementById('thresholdPct');
+      if (tSlider) tSlider.value = data.noise_threshold;
+      if (tPct) tPct.textContent = data.noise_threshold + '%';
+    }
   }
+}
+
+// ── PIR Mode Controls & Noise Threshold Override ─────────────────────────────
+const startPirBtn = document.getElementById('startPirBtn');
+const stopPirBtn = document.getElementById('stopPirBtn');
+const pirControlStatus = document.getElementById('pirControlStatus');
+const thresholdSlider = document.getElementById('thresholdSlider');
+const thresholdPct = document.getElementById('thresholdPct');
+const thresholdStatus = document.getElementById('thresholdStatus');
+let isThresholdDragging = false;
+
+if (thresholdSlider) {
+  thresholdSlider.addEventListener('mousedown', () => { isThresholdDragging = true; });
+  thresholdSlider.addEventListener('mouseup', () => { isThresholdDragging = false; });
+  thresholdSlider.addEventListener('touchstart', () => { isThresholdDragging = true; });
+  thresholdSlider.addEventListener('touchend', () => { isThresholdDragging = false; });
+}
+
+function startPirMode() {
+  if (pirControlStatus) {
+    pirControlStatus.textContent = 'Initiating PIR mode (10s countdown)…';
+    pirControlStatus.style.color = '#58a6ff';
+  }
+  fetch('/api/pir/start', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (pirControlStatus) {
+        pirControlStatus.textContent = data.message || 'PIR arming started';
+        pirControlStatus.style.color = '#3fb950';
+      }
+      setTimeout(refreshStatus, 300);
+    })
+    .catch(err => {
+      if (pirControlStatus) {
+        pirControlStatus.textContent = 'Failed to start PIR mode';
+        pirControlStatus.style.color = '#f85149';
+      }
+    });
+}
+
+function stopPirMode() {
+  if (pirControlStatus) {
+    pirControlStatus.textContent = 'Stopping PIR mode and exiting to STATUS_MODE…';
+    pirControlStatus.style.color = '#58a6ff';
+  }
+  fetch('/api/pir/stop', { method: 'POST' })
+    .then(r => r.json())
+    .then(data => {
+      if (pirControlStatus) {
+        pirControlStatus.textContent = data.message || 'PIR mode stopped';
+        pirControlStatus.style.color = '#3fb950';
+      }
+      setTimeout(refreshStatus, 300);
+      fetchRecordings();
+    })
+    .catch(err => {
+      if (pirControlStatus) {
+        pirControlStatus.textContent = 'Failed to stop PIR mode';
+        pirControlStatus.style.color = '#f85149';
+      }
+    });
+}
+
+function onThresholdInput() {
+  if (thresholdSlider && thresholdPct) {
+    thresholdPct.textContent = thresholdSlider.value + '%';
+  }
+}
+
+function setThresholdPreset(val) {
+  if (thresholdSlider && thresholdPct) {
+    thresholdSlider.value = val;
+    thresholdPct.textContent = val + '%';
+  }
+  sendNoiseThreshold(val);
+}
+
+function sendNoiseThreshold(explicitVal) {
+  const val = explicitVal !== undefined ? explicitVal : (thresholdSlider ? parseInt(thresholdSlider.value, 10) : 25);
+  if (thresholdStatus) {
+    thresholdStatus.textContent = 'Updating threshold…';
+    thresholdStatus.style.color = '#58a6ff';
+  }
+  fetch(`/api/pir/threshold?value=${val}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value: val })
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (thresholdStatus) {
+        thresholdStatus.textContent = `Threshold set to ${data.threshold || val}%`;
+        thresholdStatus.style.color = '#3fb950';
+      }
+      setTimeout(refreshStatus, 300);
+    })
+    .catch(err => {
+      if (thresholdStatus) {
+        thresholdStatus.textContent = 'Error updating noise threshold';
+        thresholdStatus.style.color = '#f85149';
+      }
+    });
 }
 
 function pollStatus() {

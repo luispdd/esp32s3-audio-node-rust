@@ -49,7 +49,18 @@ impl AudioFrame {
     pub fn is_silent(&self, threshold: i16) -> bool {
         self.samples.iter().all(|&s| s.abs() <= threshold)
     }
+
+    /// Calculates the normalized noise level percentage (0..=100) based on RMS amplitude.
+    /// Scaled against NOISE_MAX_RMS_SCALE (10,000 RMS = 100%).
+    pub fn noise_level_percent(&self) -> u8 {
+        let rms = self.rms_amplitude() as u32;
+        let pct = (rms * 100) / NOISE_MAX_RMS_SCALE;
+        pct.min(100) as u8
+    }
 }
+
+/// Baseline maximum RMS amplitude scaling for noise level percentage calculation.
+pub const NOISE_MAX_RMS_SCALE: u32 = 10_000;
 
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -83,5 +94,20 @@ mod tests {
         let sound = AudioFrame::new(16_000, 1, vec![1000; 100]);
         assert!(!sound.is_silent(100));
         assert_eq!(sound.rms_amplitude(), 1000);
+    }
+
+    #[test]
+    fn audio_frame_noise_level_percent() {
+        let silence = AudioFrame::new(16_000, 1, vec![0; 100]);
+        assert_eq!(silence.noise_level_percent(), 0);
+
+        let sound_25pct = AudioFrame::new(16_000, 1, vec![2500; 100]);
+        assert_eq!(sound_25pct.noise_level_percent(), 25);
+
+        let sound_100pct = AudioFrame::new(16_000, 1, vec![10_000; 100]);
+        assert_eq!(sound_100pct.noise_level_percent(), 100);
+
+        let sound_loud = AudioFrame::new(16_000, 1, vec![20_000; 100]);
+        assert_eq!(sound_loud.noise_level_percent(), 100);
     }
 }

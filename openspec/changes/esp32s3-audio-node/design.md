@@ -188,6 +188,23 @@ To enable automated surveillance/monitoring use cases without continuous manual 
 
 **Alternative considered:** immediate monitoring without a 10-second arming delay. Rejected because the user would immediately trigger motion detection while setting down the board or stepping away.
 
+### 15. Web Remote Controls for PIR_MODE and Noise Detection Threshold
+To allow remote operation and tuning of surveillance monitoring without physical access to the device:
+- **Remote Start (`POST /api/pir/start`):**
+  - Triggers an atomic command flag (`pir_command = 1`) on `SharedAudioBuffer`.
+  - The Core 1 main loop dequeues this command non-blockingly, switches the current device mode to `PIR_MODE` (stopping audio playback if active), and invokes `pir_button_controller.start_arming(Instant::now())`.
+  - This immediately initiates the 10-second arming countdown, exactly as if the physical Button 2 was pressed in `PIR_MODE`.
+- **Remote Stop (`POST /api/pir/stop`):**
+  - Triggers an atomic command flag (`pir_command = 2`) on `SharedAudioBuffer`.
+  - The Core 1 main loop stops and finalizes any active recording to SD (`recording_controller.stop()`), disarms the PIR controller (`pir_button_controller.disarm()`), and transitions the device mode to `STATUS_MODE`.
+- **Remote Noise Detection Threshold Override (`POST /api/pir/threshold`):**
+  - Supports query parameter `?value=<1..100>` and JSON body `{"value": <1..100>}`.
+  - Dynamically updates the atomic noise threshold stored in `SharedAudioBuffer` (`noise_threshold: AtomicU8`, default 25%).
+  - Core 1 uses this threshold when comparing microphone noise percentage to determine sound presence and whether to extend active PIR recording timers.
+  - The browser UI provides an interactive slider and presets (`15% Quiet`, `25% Default`, `40% Loud`), synchronized with the device's `/status` and `/api/pir` state.
+
+**Alternative considered:** direct mutation of mode controllers across threads from the HTTP server task. Rejected because Core 1 owns mode navigation, button controllers, and display rendering; routing commands via atomic state on `SharedAudioBuffer` maintains strict thread safety and avoids FreeRTOS mutex contention.
+
 ## Risks / Trade-offs
 
 - [PIR sensor noise and false triggers] → Require an armed state via Button 2 with a 10-second arming delay, and debounce PIR readings so transient noise spikes do not trigger spurious recording writes.

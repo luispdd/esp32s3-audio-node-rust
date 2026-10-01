@@ -204,4 +204,19 @@ The system SHALL support a `PIR_MODE` that detects movement using the PIR sensor
 - **WHEN** motion monitoring or recording is active in PIR_MODE and Button 1 is pressed for at least the long-press threshold
 - **THEN** the system SHALL turn off the OLED display while keeping motion monitoring and recording active in the background
 
+### Requirement: Web interface controls PIR_MODE lifecycle and noise threshold override
+The system SHALL expose web endpoints and UI controls to remotely start and stop `PIR_MODE` and dynamically override the noise detection threshold.
+
+#### Scenario: User starts PIR_MODE from web interface
+- **WHEN** the user triggers the Start PIR command from the browser UI or sends a POST request to `/api/pir/start`
+- **THEN** the device SHALL immediately transition to `PIR_MODE` (stopping audio playback if active in `SD_MODE`) and immediately start the 10-second arming countdown, exactly as if entering `PIR_MODE` and pressing Button 2
+
+#### Scenario: User stops PIR_MODE from web interface
+- **WHEN** the user triggers the Stop PIR command from the browser UI or sends a POST request to `/api/pir/stop`
+- **THEN** the device SHALL stop and finalize any active recording to the SD card, disarm the PIR controller, and immediately exit `PIR_MODE` to `STATUS_MODE`
+
+#### Scenario: User overrides noise detection threshold from web interface
+- **WHEN** the user updates the noise detection threshold via the slider or presets on the browser UI, or sends a POST request to `/api/pir/threshold` with the desired percentage (1..=100)
+- **THEN** the device SHALL update the active noise detection threshold in memory and apply it immediately to sound detection and PIR recording extension logic
+
 

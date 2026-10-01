@@ -6,6 +6,7 @@ pub struct PirModeStatus {
     pub armed: bool,
     pub arming_countdown: Option<u8>,
     pub recording_remaining_secs: Option<u8>,
+    pub sound_detected: bool,
 }
 
 impl PirModeStatus {
@@ -28,6 +29,8 @@ pub struct SystemStatus {
     pub sd: bool,
     pub sd_card: SdCardStatus,
     pub gain_percent: u8,
+    pub noise_level: u8,
+    pub noise_threshold: u8,
     pub recording: Option<ActiveRecordingInfo>,
     pub playback: Option<ActivePlaybackInfo>,
     pub selected_file_index: usize,
@@ -43,11 +46,19 @@ impl SystemStatus {
             sd: sd_card.is_mounted(),
             sd_card,
             gain_percent,
+            noise_level: 0,
+            noise_threshold: crate::config::NOISE_DETECTION_THRESHOLD_PERCENT,
             recording: None,
             playback: None,
             selected_file_index: 0,
             pir_mode: PirModeStatus::default(),
         }
+    }
+
+    pub fn with_noise_level(mut self, noise_level: u8, noise_threshold: u8) -> Self {
+        self.noise_level = noise_level;
+        self.noise_threshold = noise_threshold;
+        self
     }
 
     pub fn with_recording(mut self, recording: Option<ActiveRecordingInfo>) -> Self {
@@ -85,6 +96,8 @@ impl SystemStatus {
             sd: is_writable,
             sd_card,
             gain_percent: 100,
+            noise_level: 0,
+            noise_threshold: crate::config::NOISE_DETECTION_THRESHOLD_PERCENT,
             recording: None,
             playback: None,
             selected_file_index: 0,
@@ -106,6 +119,8 @@ impl SystemStatus {
             sd: sd_card.is_mounted(),
             sd_card,
             gain_percent,
+            noise_level: 0,
+            noise_threshold: crate::config::NOISE_DETECTION_THRESHOLD_PERCENT,
             recording: None,
             playback: None,
             selected_file_index: 0,
@@ -119,7 +134,12 @@ impl SystemStatus {
 
     pub fn summary_lines(&self) -> Vec<String> {
         vec![
-            format!("wifi {} mic {}", status_marker(self.wifi), status_marker(self.mic)),
+            format!(
+                "wifi {} mic {} n:{}%",
+                status_marker(self.wifi),
+                status_marker(self.mic),
+                self.noise_level
+            ),
             format!(
                 "pir {} sd {} g:{}%",
                 status_marker(self.pir),
@@ -152,6 +172,8 @@ mod tests {
             sd: true,
             sd_card: SdCardStatus::Empty,
             gain_percent: 75,
+            noise_level: 25,
+            noise_threshold: crate::config::NOISE_DETECTION_THRESHOLD_PERCENT,
             recording: None,
             playback: None,
             selected_file_index: 0,
@@ -162,6 +184,7 @@ mod tests {
 
         assert!(summary[0].contains("wifi OK"));
         assert!(summary[0].contains("mic OK"));
+        assert!(summary[0].contains("n:25%"));
         assert!(summary[1].contains("pir KO"));
         assert!(summary[1].contains("sd OK"));
         assert!(summary[1].contains("g:75%"));

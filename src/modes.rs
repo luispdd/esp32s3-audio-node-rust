@@ -432,9 +432,18 @@ impl PirButtonController {
         self.last_motion_at = None;
     }
 
-    pub fn handle_motion(
+    /// Immediately begins the 10-second arming delay (acting like Button 2 press in IDLE).
+    pub fn start_arming(&mut self, now: Instant) {
+        self.state = PirOperationalState::Arming(now);
+        self.last_motion_at = None;
+    }
+
+    /// Evaluates motion and acoustic sound activity, triggering recording or extending active recording.
+    /// Task 6.5: sound activity exceeding baseline threshold extends/resets the 20-second recording timer.
+    pub fn handle_activity(
         &mut self,
         motion_detected: bool,
+        sound_detected: bool,
         is_recording: bool,
         now: Instant,
     ) -> PirMotionAction {
@@ -451,7 +460,7 @@ impl PirButtonController {
                 PirMotionAction::None
             }
         } else {
-            if motion_detected {
+            if motion_detected || sound_detected {
                 self.last_motion_at = Some(now);
                 PirMotionAction::None
             } else if let Some(last_motion) = self.last_motion_at {
@@ -466,6 +475,15 @@ impl PirButtonController {
                 PirMotionAction::None
             }
         }
+    }
+
+    pub fn handle_motion(
+        &mut self,
+        motion_detected: bool,
+        is_recording: bool,
+        now: Instant,
+    ) -> PirMotionAction {
+        self.handle_activity(motion_detected, false, is_recording, now)
     }
 
     pub fn update(&mut self, b2_down: bool, b3_down: bool, is_recording: bool) -> PirButtonAction {
@@ -921,5 +939,51 @@ mod tests {
         assert_eq!(ctrl.handle_motion(false, true, t_timeout), PirMotionAction::StopRecordingTimeout);
         assert!(ctrl.is_armed());
         assert_eq!(ctrl.remaining_recording_secs(t_timeout), None);
+    }
+
+    #[test]
+    fn pir_sound_detection_resets_20s_timeout() {
+        let mut ctrl = PirButtonController::with_durations(Duration::from_secs(10), Duration::from_secs(20));
+        let t0 = Instant::now();
+
+        // Arm and enter armed state
+        ctrl.update_with_time(true, false, false, t0);
+        ctrl.update_with_time(false, false, false, t0 + Duration::from_secs(10));
+        assert!(ctrl.is_armed());
+
+        // Initial motion triggers recording
+        let t_motion = t0 + Duration::from_secs(11);
+        assert_eq!(ctrl.handle_activity(true, false, false, t_motion), PirMotionAction::StartRecording);
+
+        // At +15s, no motion but sound detected -> resets timer!
+        let t_sound = t_motion + Duration::from_secs(15);
+        assert_eq!(ctrl.handle_activity(false, true, true, t_sound), PirMotionAction::None);
+        assert_eq!(ctrl.remaining_recording_secs(t_sound), Some(20));
+
+        // At +10s after sound (25s after initial motion), 10s remain
+        let t_check = t_sound + Duration::from_secs(10);
+        assert_eq!(ctrl.handle_activity(false, false, true, t_check), PirMotionAction::None);
+        assert_eq!(ctrl.remaining_recording_secs(t_check), Some(10));
+
+        // At +20s after sound -> StopRecordingTimeout
+        let t_timeout = t_sound + Duration::from_secs(20);
+        assert_eq!(ctrl.handle_activity(false, false, true, t_timeout), PirMotionAction::StopRecordingTimeout);
+        assert!(ctrl.is_armed());
+    }
+
+    #[test]
+    fn pir_button_start_arming_begins_10s_delay() {
+        let mut ctrl = PirButtonController::new(Duration::from_secs(10));
+        let t0 = Instant::now();
+        assert!(ctrl.is_idle());
+
+        ctrl.start_arming(t0);
+        assert!(ctrl.is_arming());
+        assert_eq!(ctrl.arming_countdown_secs(t0), Some(10));
+        assert_eq!(ctrl.arming_countdown_secs(t0 + Duration::from_secs(4)), Some(6));
+
+        // After 10s, update advances state to armed
+        ctrl.update_with_time(false, false, false, t0 + Duration::from_secs(10));
+        assert!(ctrl.is_armed());
     }
 }

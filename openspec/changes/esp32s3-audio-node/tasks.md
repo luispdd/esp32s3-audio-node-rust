@@ -61,8 +61,9 @@
 - [x] 6.2 Implement Button 2 arming and lifecycle state machine in `PIR_MODE`: pressing Button 2 initiates a 10-second arming countdown before activating motion monitoring; pressing Button 2 again disarms monitoring (or stops active recording); short-pressing Button 1 changes mode and disarms; long-pressing Button 1 toggles display power while keeping monitoring active
 - [x] 6.3 Implement motion detection trigger and immediate recording: when the 10-second arming delay has elapsed and the detector is actively monitoring, immediately trigger audio recording to `/audio/YYYYMMDD_HHMMSS.wav` on the SD card whenever the PIR sensor (GPIO 3) detects movement
 - [x] 6.4 Implement dynamic recording duration extension: maintain recording for 20 seconds from the latest motion event, resetting the 20-second countdown each time new movement is detected by the PIR sensor, and cleanly finalize the WAV file and return to the active monitoring state once 20 seconds have elapsed without motion
-- [ ] 6.5 (Optional) Implement microphone acoustic pattern extension: monitor microphone audio level during PIR recording to extend/reset the 20-second recording timer if sound activity exceeding the ambient baseline pattern is detected
+- [x] 6.5 (Optional) Implement microphone acoustic pattern extension: monitor microphone audio level during PIR recording to extend/reset the 20-second recording timer if sound activity exceeding the ambient baseline pattern is detected
 - [x] 6.6 Update system status reporting and web status / API endpoints to reflect `PIR_MODE` state, arming countdown, active monitoring, and motion recording activity
+- [x] 6.7 Enable web interface controls to remotely start/stop PIR_MODE (entering PIR_MODE and immediately starting the 10-second countdown on start; stopping active recording and returning to STATUS_MODE on stop) and dynamically override the noise detection threshold
 
 ## 7. Hardening and Polish
 

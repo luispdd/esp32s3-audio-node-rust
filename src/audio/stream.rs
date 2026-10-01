@@ -111,6 +111,38 @@ pub fn parse_gain_override_params(uri: &str, body: &str) -> (Option<bool>, Optio
     (override_opt, value_opt)
 }
 
+/// Parses the noise threshold parameter from either a URI query string or a JSON body string.
+/// Returns Option<threshold_percent_0_to_100>.
+pub fn parse_threshold_param(uri: &str, body: &str) -> Option<u8> {
+    if let Some(query_idx) = uri.find('?') {
+        let query = &uri[query_idx + 1..];
+        for param in query.split('&') {
+            if let Some((k, v)) = param.split_once('=') {
+                if k.eq_ignore_ascii_case("value") || k.eq_ignore_ascii_case("threshold") {
+                    if let Ok(val) = v.parse::<u8>() {
+                        return Some(val.clamp(0, 100));
+                    }
+                }
+            }
+        }
+    }
+
+    for key in &["\"value\":", "\"threshold\":"] {
+        if let Some(idx) = body.find(key) {
+            let after = &body[idx + key.len()..];
+            let trimmed = after.trim_start();
+            let end = trimmed
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(trimmed.len());
+            if let Ok(val) = trimmed[..end].parse::<u8>() {
+                return Some(val.clamp(0, 100));
+            }
+        }
+    }
+
+    None
+}
+
 /// Thread-safe ring buffer for sharing live audio frames between Core 1 and Core 0.
 /// Backed by heap/PSRAM allocations, keeping real-time acquisition decoupled from network I/O.
 #[derive(Clone)]
@@ -140,6 +172,11 @@ struct AudioBufferInner {
     pir_motion_detected: AtomicBool,
     /// PIR recording remaining seconds (0 if None, else 1..=20)
     pir_recording_remaining_secs: AtomicU8,
+    /// Latest normalized noise level percentage (0..=100)
+    noise_level: AtomicU8,
+    /// Pending command from web interface:
+    /// 0: None, 1: Start PIR_MODE (switch mode to PIR_MODE and start 10s arming delay), 2: Stop PIR_MODE (stop/save active recording if any, disarm, exit to STATUS_MODE)
+    pir_command: AtomicU8,
 }
 
 struct AudioBufferState {
@@ -158,6 +195,8 @@ pub struct PirStatusSnapshot {
     pub arming_countdown: Option<u8>,
     pub motion_detected: bool,
     pub recording_remaining_secs: Option<u8>,
+    pub noise_level: u8,
+    pub sound_detected: bool,
 }
 
 /// Default buffer capacity in frames (150 frames * 20ms = 3,000ms = 3 seconds).
@@ -187,6 +226,8 @@ impl SharedAudioBuffer {
                 pir_arming_countdown: AtomicU8::new(0),
                 pir_motion_detected: AtomicBool::new(false),
                 pir_recording_remaining_secs: AtomicU8::new(0),
+                noise_level: AtomicU8::new(0),
+                pir_command: AtomicU8::new(0),
             }),
         }
     }
@@ -214,6 +255,16 @@ impl SharedAudioBuffer {
     /// Pushes a newly captured audio frame into the buffer.
     pub fn push_frame(&self, frame: AudioFrame) {
         let has_energy = frame.samples.iter().any(|&s| s.abs() > 300);
+        let frame_noise = frame.noise_level_percent();
+        let prev_noise = self.inner.noise_level.load(Ordering::Relaxed);
+        let smoothed_noise = if frame_noise >= prev_noise {
+            frame_noise
+        } else {
+            // Smooth decay: 7/8 previous + 1/8 current
+            ((prev_noise as u16 * 7 + frame_noise as u16) / 8) as u8
+        };
+        self.inner.noise_level.store(smoothed_noise, Ordering::Relaxed);
+
         let mut state = self.inner.state.lock().unwrap();
         state.seq = state.seq.wrapping_add(1);
         state.signal_present = has_energy;
@@ -327,6 +378,31 @@ impl SharedAudioBuffer {
         self.inner.gain_override_percent.load(Ordering::Relaxed) as u8
     }
 
+    /// Returns the current smoothed microphone noise level percentage (0..=100).
+    pub fn current_noise_level(&self) -> u8 {
+        self.inner.noise_level.load(Ordering::Relaxed)
+    }
+
+    /// Evaluates if the current noise level meets or exceeds the given threshold percentage.
+    pub fn is_noise_above(&self, threshold_percent: u8) -> bool {
+        self.current_noise_level() >= threshold_percent
+    }
+
+    /// Requests entering PIR_MODE and initiating the 10-second arming delay from web interface.
+    pub fn request_pir_start(&self) {
+        self.inner.pir_command.store(1, Ordering::SeqCst);
+    }
+
+    /// Requests stopping PIR_MODE (saving active recording if any, disarming, and exiting) from web interface.
+    pub fn request_pir_stop(&self) {
+        self.inner.pir_command.store(2, Ordering::SeqCst);
+    }
+
+    /// Retrieves and clears any pending PIR web command.
+    pub fn take_pir_command(&self) -> u8 {
+        self.inner.pir_command.swap(0, Ordering::SeqCst)
+    }
+
     /// Updates the atomic PIR and device mode status for status reporting and web endpoints.
     pub fn update_pir_status(
         &self,
@@ -372,6 +448,8 @@ impl SharedAudioBuffer {
         let arming_cd = self.inner.pir_arming_countdown.load(Ordering::Relaxed);
         let motion = self.inner.pir_motion_detected.load(Ordering::Relaxed);
         let rec_rem = self.inner.pir_recording_remaining_secs.load(Ordering::Relaxed);
+        let noise_lvl = self.inner.noise_level.load(Ordering::Relaxed);
+        let snd_det = noise_lvl >= crate::audio::get_noise_threshold();
 
         PirStatusSnapshot {
             mode: mode_str,
@@ -380,6 +458,8 @@ impl SharedAudioBuffer {
             arming_countdown: if arming_cd > 0 { Some(arming_cd) } else { None },
             motion_detected: motion,
             recording_remaining_secs: if rec_rem > 0 { Some(rec_rem) } else { None },
+            noise_level: noise_lvl,
+            sound_detected: snd_det,
         }
     }
 }
@@ -529,9 +609,13 @@ impl LiveAudioStream {
                     Some(info) => (true, info.filename, info.duration_secs, info.total_secs),
                     None => (false, String::new(), 0, 0),
                 };
+                let noise_level = status_buffer.current_noise_level();
+                let noise_threshold = crate::audio::get_noise_threshold();
+                let sound_detected = status_buffer.is_noise_above(noise_threshold);
                 let body = format!(
-                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"device_mode":"{}","pir_state":"{}","pir_armed":{},"pir_arming_countdown":{},"pir_motion_detected":{},"pir_recording_remaining_secs":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{},"playback":{},"playback_filename":"{}","playback_duration":{},"playback_total":{}}}"#,
+                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"noise_level":{},"noise_threshold":{},"sound_detected":{},"device_mode":"{}","pir_state":"{}","pir_armed":{},"pir_arming_countdown":{},"pir_motion_detected":{},"pir_recording_remaining_secs":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{},"playback":{},"playback_filename":"{}","playback_duration":{},"playback_total":{}}}"#,
                     signal, listeners, gain_percent, override_active, override_percent,
+                    noise_level, noise_threshold, sound_detected,
                     pir.mode, pir.state, pir.armed, pir_arming_cd_str, pir.motion_detected, pir_rec_rem_str,
                     is_rec, rec_fn, rec_dur, rec_frames, is_play, pb_fn, pb_dur, pb_total
                 );
@@ -955,9 +1039,11 @@ impl LiveAudioStream {
                     Some(rem) => rem.to_string(),
                     None => "null".to_string(),
                 };
+                let noise_threshold = crate::audio::get_noise_threshold();
                 let body = format!(
-                    r#"{{"status":"ok","device_mode":"{}","pir_state":"{}","armed":{},"arming_countdown":{},"motion_detected":{},"recording_remaining_secs":{}}}"#,
-                    pir.mode, pir.state, pir.armed, pir_arming_cd_str, pir.motion_detected, pir_rec_rem_str
+                    r#"{{"status":"ok","device_mode":"{}","pir_state":"{}","armed":{},"arming_countdown":{},"motion_detected":{},"recording_remaining_secs":{},"noise_level":{},"noise_threshold":{},"sound_detected":{}}}"#,
+                    pir.mode, pir.state, pir.armed, pir_arming_cd_str, pir.motion_detected, pir_rec_rem_str,
+                    pir.noise_level, noise_threshold, pir.sound_detected
                 );
                 let headers = [
                     ("Content-Type", "application/json"),
@@ -974,7 +1060,7 @@ impl LiveAudioStream {
             .fn_handler("/api/pir*", Method::Options, |req| -> Result<(), EspIOError> {
                 let headers = [
                     ("Access-Control-Allow-Origin", "*"),
-                    ("Access-Control-Allow-Methods", "GET, OPTIONS"),
+                    ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
                     ("Access-Control-Allow-Headers", "*"),
                     ("Content-Length", "0"),
                 ];
@@ -982,6 +1068,77 @@ impl LiveAudioStream {
                 Ok(())
             })
             .map_err(|err| format!("Failed to register /api/pir OPTIONS handler: {err}"))?;
+
+        let pir_start_buf = shared_buffer.clone();
+        main_server
+            .fn_handler("/api/pir/start*", Method::Post, move |req| -> Result<(), EspIOError> {
+                pir_start_buf.request_pir_start();
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Access-Control-Allow-Origin", "*"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(br#"{"status":"ok","action":"start_pir_mode"}"#)?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /api/pir/start handler: {err}"))?;
+
+        let pir_stop_buf = shared_buffer.clone();
+        main_server
+            .fn_handler("/api/pir/stop*", Method::Post, move |req| -> Result<(), EspIOError> {
+                pir_stop_buf.request_pir_stop();
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Access-Control-Allow-Origin", "*"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(br#"{"status":"ok","action":"stop_pir_mode"}"#)?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /api/pir/stop handler: {err}"))?;
+
+        main_server
+            .fn_handler("/api/pir/threshold*", Method::Post, |mut req| -> Result<(), EspIOError> {
+                let uri = req.uri();
+                let mut val_opt = parse_threshold_param(uri, "");
+                if val_opt.is_none() {
+                    let content_len = req
+                        .header("Content-Length")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if content_len > 0 {
+                        let mut body_buf = [0u8; 128];
+                        let to_read = content_len.min(body_buf.len());
+                        let mut read_bytes = 0;
+                        while read_bytes < to_read {
+                            match req.read(&mut body_buf[read_bytes..to_read]) {
+                                Ok(0) => break,
+                                Ok(n) => read_bytes += n,
+                                Err(_) => break,
+                            }
+                        }
+                        if let Ok(body_str) = std::str::from_utf8(&body_buf[..read_bytes]) {
+                            val_opt = parse_threshold_param("", body_str);
+                        }
+                    }
+                }
+
+                if let Some(val) = val_opt {
+                    crate::audio::set_noise_threshold(val);
+                    log::info!("Web: noise detection threshold updated to {val}%");
+                }
+
+                let current = crate::audio::get_noise_threshold();
+                let body = format!(r#"{{"status":"ok","noise_threshold":{}}}"#, current);
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Access-Control-Allow-Origin", "*"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(body.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /api/pir/threshold handler: {err}"))?;
 
         // ── 2. Dedicated Streaming Server (Port 8080) ────────────────────────
         // Pinned to its own FreeRTOS task so that the continuous audio streaming
@@ -1326,5 +1483,49 @@ mod tests {
         assert_eq!(buffer.current_seq(), 1);
         assert_eq!(buffer.len(), 1);
         assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn shared_audio_buffer_tracks_noise_level() {
+        let buffer = SharedAudioBuffer::new(10);
+        assert_eq!(buffer.current_noise_level(), 0);
+        assert!(!buffer.is_noise_above(20));
+
+        // Push frame with 5,000 amplitude -> RMS = 5,000 -> 50% noise level
+        let sound_frame = AudioFrame::new(16_000, 1, vec![5_000; 320]);
+        buffer.push_frame(sound_frame);
+
+        assert_eq!(buffer.current_noise_level(), 50);
+        assert!(buffer.is_noise_above(25));
+        assert!(buffer.is_noise_above(50));
+        assert!(!buffer.is_noise_above(51));
+
+        let summary = buffer.pir_status_summary();
+        assert_eq!(summary.noise_level, 50);
+        assert!(summary.sound_detected);
+    }
+
+    #[test]
+    fn parse_threshold_param_from_query_and_body() {
+        assert_eq!(parse_threshold_param("/api/pir/threshold?value=35", ""), Some(35));
+        assert_eq!(parse_threshold_param("/api/pir/threshold?threshold=50", ""), Some(50));
+        assert_eq!(parse_threshold_param("/api/pir/threshold?value=150", ""), Some(100)); // clamped
+        assert_eq!(parse_threshold_param("/api/pir/threshold", r#"{"value": 40}"#), Some(40));
+        assert_eq!(parse_threshold_param("/api/pir/threshold", r#"{"threshold": 15}"#), Some(15));
+        assert_eq!(parse_threshold_param("/api/pir/threshold", ""), None);
+    }
+
+    #[test]
+    fn shared_audio_buffer_pir_commands() {
+        let buffer = SharedAudioBuffer::new(10);
+        assert_eq!(buffer.take_pir_command(), 0);
+
+        buffer.request_pir_start();
+        assert_eq!(buffer.take_pir_command(), 1);
+        assert_eq!(buffer.take_pir_command(), 0);
+
+        buffer.request_pir_stop();
+        assert_eq!(buffer.take_pir_command(), 2);
+        assert_eq!(buffer.take_pir_command(), 0);
     }
 }

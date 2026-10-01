@@ -1,4 +1,21 @@
 use crate::audio::frame::AudioFrame;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+pub use crate::config::NOISE_DETECTION_THRESHOLD_PERCENT;
+
+/// Global runtime noise detection threshold percentage (0..=100) initialized from config.
+/// Audio exceeding this percentage is recognized as acoustic sound activity.
+pub static NOISE_THRESHOLD_PERCENT: AtomicU8 = AtomicU8::new(NOISE_DETECTION_THRESHOLD_PERCENT);
+
+/// Returns the current noise detection threshold percentage (0..=100).
+pub fn get_noise_threshold() -> u8 {
+    NOISE_THRESHOLD_PERCENT.load(Ordering::Relaxed)
+}
+
+/// Dynamically sets the noise detection threshold percentage (0..=100).
+pub fn set_noise_threshold(val: u8) {
+    NOISE_THRESHOLD_PERCENT.store(val.min(100), Ordering::Relaxed);
+}
 
 #[cfg(target_arch = "xtensa")]
 use esp_idf_svc::hal::gpio::{AnyIOPin, Gpio14, Gpio15, Gpio16};

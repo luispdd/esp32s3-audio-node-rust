@@ -1,5 +1,13 @@
 use std::collections::BTreeSet;
 
+/// Configurable noise level detection threshold percentage (0..=100) for microphone acoustic activity (Task 6.5).
+/// When live audio noise level meets or exceeds this percentage during PIR monitoring / recording,
+/// sound activity is detected and the recording timer is extended.
+/// Update this variable easily in code to adjust microphone acoustic sensitivity:
+/// - Lower value (e.g. 15): more sensitive to quieter sounds
+/// - Higher value (e.g. 40): requires louder sounds to trigger
+pub const NOISE_DETECTION_THRESHOLD_PERCENT: u8 = 25;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WifiCredentials {
     pub ssid: String,

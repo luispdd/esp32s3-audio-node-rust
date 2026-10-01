@@ -156,7 +156,7 @@ where
 
     match mode {
         DeviceMode::Status => render_status_screen(display, status, text_style),
-        DeviceMode::Live => render_live_screen(display, connection, text_style),
+        DeviceMode::Live => render_live_screen(display, connection, status, text_style),
         DeviceMode::Sd => render_sd_screen(display, status, text_style),
         DeviceMode::Pir => render_pir_screen(display, status, text_style),
     }
@@ -205,6 +205,7 @@ where
 pub fn render_live_screen<D>(
     display: &mut D,
     connection: &WifiConnection,
+    status: &SystemStatus,
     text_style: MonoTextStyle<'_, BinaryColor>,
 ) -> Result<(), String>
 where
@@ -223,12 +224,22 @@ where
     let ip_line = format!("IP {}", connection.ip);
     Text::with_baseline(
         ip_line.as_str(),
-        Point::new(MARGIN_LEFT, MARGIN_TOP + 12),
+        Point::new(MARGIN_LEFT, MARGIN_TOP + 10),
         text_style,
         Baseline::Top,
     )
     .draw(display)
     .map_err(|_| "failed to draw live IP line".to_string())?;
+
+    let noise_line = format!("Noise: {}%  Gain: {}%", status.noise_level, status.gain_percent);
+    Text::with_baseline(
+        noise_line.as_str(),
+        Point::new(MARGIN_LEFT, MARGIN_TOP + 20),
+        text_style,
+        Baseline::Top,
+    )
+    .draw(display)
+    .map_err(|_| "failed to draw live noise line".to_string())?;
 
     Ok(())
 }
@@ -370,6 +381,7 @@ where
     D: DrawTarget<Color = BinaryColor>,
     D::Error: core::fmt::Debug,
 {
+    let noise = status.noise_level;
     let (header, line1, line2) = if let Some(ref rec) = status.recording {
         let mins = rec.duration_secs / 60;
         let secs = rec.duration_secs % 60;
@@ -378,17 +390,22 @@ where
         } else {
             format!("{:02}:{:02}", mins, secs)
         };
-        let motion_tag = if status.pir { "MOT" } else { "---" };
+        let act_tag = match (status.pir, status.pir_mode.sound_detected) {
+            (true, true) => "M+S",
+            (true, false) => "MOT",
+            (false, true) => "SND",
+            (false, false) => "---",
+        };
         (
             format!("{} [REC]", DeviceMode::Pir.as_str()),
-            format!("{} [{}]", rem_str, motion_tag),
+            format!("{rem_str} [{act_tag}] N:{noise}%"),
             truncate_display_line(&rec.filename, 20),
         )
     } else if let Some(countdown) = status.pir_mode.arming_countdown {
         (
             format!("{} [ARMING]", DeviceMode::Pir.as_str()),
-            format!("Arming in: {countdown}s"),
-            "Motion ignored".to_string(),
+            format!("Arm in: {countdown}s"),
+            format!("Noise: {noise}% (ign)"),
         )
     } else if status.pir_mode.armed {
         let motion_line = if status.pir {
@@ -396,10 +413,15 @@ where
         } else {
             "Motion: CLEAR"
         };
+        let active_line = if status.pir_mode.sound_detected {
+            format!("Act [SND] Noise:{noise}%")
+        } else {
+            format!("Active  Noise:{noise}%")
+        };
         (
             format!("{} [ARMED]", DeviceMode::Pir.as_str()),
             motion_line.to_string(),
-            "Monitoring active".to_string(),
+            active_line,
         )
     } else {
         let pir_state = if status.pir {
@@ -409,7 +431,7 @@ where
         };
         (
             format!("{} [IDLE]", DeviceMode::Pir.as_str()),
-            pir_state.to_string(),
+            format!("{pir_state}  N:{noise}%"),
             "Btn2: Arm (10s delay)".to_string(),
         )
     };
@@ -491,10 +513,10 @@ mod tests {
         display.set_allow_overdraw(true);
         display.set_allow_out_of_bounds_drawing(true);
         let wifi = mock_wifi();
-        let status = SystemStatus::from_runtime(true);
+        let status = SystemStatus::from_runtime(true).with_noise_level(30, 25);
         let style = default_text_style();
 
-        assert!(render_live_screen(&mut display, &wifi, style).is_ok());
+        assert!(render_live_screen(&mut display, &wifi, &status, style).is_ok());
         assert!(render_mode_screen(&mut display, DeviceMode::Live, &wifi, &status, style).is_ok());
     }
 
@@ -605,7 +627,7 @@ mod tests {
         assert!(render_pir_screen(&mut display, &status_armed_motion, style).is_ok());
 
         // 6. Recording in progress with remaining seconds
-        let mut status_rec = SystemStatus::from_runtime(true);
+        let mut status_rec = SystemStatus::from_runtime(true).with_noise_level(45, 25);
         status_rec.pir_mode.armed = true;
         status_rec.pir_mode.recording_remaining_secs = Some(18);
         status_rec.recording = Some(crate::audio::ActiveRecordingInfo {
@@ -614,5 +636,16 @@ mod tests {
             frames_recorded: 100,
         });
         assert!(render_pir_screen(&mut display, &status_rec, style).is_ok());
+
+        // 7. Recording in progress with sound detected (M+S tag)
+        status_rec.pir = true;
+        status_rec.pir_mode.sound_detected = true;
+        assert!(render_pir_screen(&mut display, &status_rec, style).is_ok());
+
+        // 8. Armed monitoring with acoustic activity detected
+        let mut status_armed_sound = SystemStatus::from_runtime(true).with_noise_level(60, 25);
+        status_armed_sound.pir_mode.armed = true;
+        status_armed_sound.pir_mode.sound_detected = true;
+        assert!(render_pir_screen(&mut display, &status_armed_sound, style).is_ok());
     }
 }
