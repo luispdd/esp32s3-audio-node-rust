@@ -282,6 +282,34 @@ audio {
 
 <div class="card" style="margin-top: 1.5rem;">
   <div class="header">
+    <h1>PIR Motion Detection</h1>
+    <span class="badge" id="pirBadge" style="background: #21262d; color: #8b949e; border-color: #30363d;">
+      <span class="pulse" id="pirPulse" style="display: none; background: #3fb950; box-shadow: 0 0 8px #3fb950;"></span>
+      <span id="pirBadgeText">IDLE</span>
+    </span>
+  </div>
+  <div class="info-grid">
+    <div class="info-box">
+      <div class="info-label">Device Mode</div>
+      <div class="info-value" id="deviceModeVal">STATUS_MODE</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">PIR Monitoring</div>
+      <div class="info-value" id="pirStateVal">Idle (Disarmed)</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">Motion Sensor</div>
+      <div class="info-value" id="pirMotionVal">Clear</div>
+    </div>
+    <div class="info-box">
+      <div class="info-label">Auto-Recording</div>
+      <div class="info-value" id="pirRecVal">Inactive</div>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top: 1.5rem;">
+  <div class="header">
     <h1>SD Card Recordings</h1>
     <span class="badge" id="recBadge" style="display:none; background: rgba(218, 54, 51, 0.2); color: #f85149; border-color: #da3633;">
       <span class="pulse" style="background: #f85149; box-shadow: 0 0 8px #f85149;"></span>
@@ -676,9 +704,88 @@ function refreshStatus() {
         }
       }
       updateRecordingStatus(data);
+      updatePirStatus(data);
     })
     .catch(() => {});
   fetchRecordings();
+}
+
+function updatePirStatus(data) {
+  if (!data) return;
+  if (data.device_mode) {
+    const modeEl = document.getElementById('deviceModeVal');
+    if (modeEl) modeEl.textContent = data.device_mode;
+  }
+  if (data.pir_state !== undefined) {
+    const pirStateEl = document.getElementById('pirStateVal');
+    const pirMotionEl = document.getElementById('pirMotionVal');
+    const pirRecEl = document.getElementById('pirRecVal');
+    const pirBadge = document.getElementById('pirBadge');
+    const pirPulse = document.getElementById('pirPulse');
+    const pirBadgeText = document.getElementById('pirBadgeText');
+
+    if (pirMotionEl) {
+      if (data.pir_motion_detected) {
+        pirMotionEl.textContent = 'DETECTED';
+        pirMotionEl.style.color = '#f85149';
+      } else {
+        pirMotionEl.textContent = 'Clear';
+        pirMotionEl.style.color = '#e6edf3';
+      }
+    }
+
+    if (data.pir_state === 'armed') {
+      if (pirStateEl) {
+        pirStateEl.textContent = 'Active (Monitoring)';
+        pirStateEl.style.color = '#3fb950';
+      }
+      if (pirBadge) {
+        pirBadge.style.background = 'rgba(63, 185, 80, 0.15)';
+        pirBadge.style.color = '#3fb950';
+        pirBadge.style.borderColor = '#238636';
+      }
+      if (pirPulse) pirPulse.style.display = 'inline-block';
+      if (pirBadgeText) pirBadgeText.textContent = 'ARMED';
+    } else if (data.pir_state === 'arming') {
+      const cd = data.pir_arming_countdown != null ? `${data.pir_arming_countdown}s` : '...';
+      if (pirStateEl) {
+        pirStateEl.textContent = `Arming (${cd})`;
+        pirStateEl.style.color = '#d29922';
+      }
+      if (pirBadge) {
+        pirBadge.style.background = 'rgba(210, 153, 34, 0.15)';
+        pirBadge.style.color = '#d29922';
+        pirBadge.style.borderColor = '#9e6a03';
+      }
+      if (pirPulse) pirPulse.style.display = 'inline-block';
+      if (pirBadgeText) pirBadgeText.textContent = `ARMING (${cd})`;
+    } else {
+      if (pirStateEl) {
+        pirStateEl.textContent = 'Idle (Disarmed)';
+        pirStateEl.style.color = '#8b949e';
+      }
+      if (pirBadge) {
+        pirBadge.style.background = '#21262d';
+        pirBadge.style.color = '#8b949e';
+        pirBadge.style.borderColor = '#30363d';
+      }
+      if (pirPulse) pirPulse.style.display = 'none';
+      if (pirBadgeText) pirBadgeText.textContent = 'IDLE';
+    }
+
+    if (pirRecEl) {
+      if (data.pir_recording_remaining_secs != null && data.pir_recording_remaining_secs > 0) {
+        pirRecEl.textContent = `Active (${data.pir_recording_remaining_secs}s rem)`;
+        pirRecEl.style.color = '#f85149';
+      } else if (data.recording) {
+        pirRecEl.textContent = 'Recording active';
+        pirRecEl.style.color = '#f85149';
+      } else {
+        pirRecEl.textContent = 'Inactive';
+        pirRecEl.style.color = '#8b949e';
+      }
+    }
+  }
 }
 
 function pollStatus() {

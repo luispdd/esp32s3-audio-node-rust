@@ -62,7 +62,7 @@
 - [x] 6.3 Implement motion detection trigger and immediate recording: when the 10-second arming delay has elapsed and the detector is actively monitoring, immediately trigger audio recording to `/audio/YYYYMMDD_HHMMSS.wav` on the SD card whenever the PIR sensor (GPIO 3) detects movement
 - [x] 6.4 Implement dynamic recording duration extension: maintain recording for 20 seconds from the latest motion event, resetting the 20-second countdown each time new movement is detected by the PIR sensor, and cleanly finalize the WAV file and return to the active monitoring state once 20 seconds have elapsed without motion
 - [ ] 6.5 (Optional) Implement microphone acoustic pattern extension: monitor microphone audio level during PIR recording to extend/reset the 20-second recording timer if sound activity exceeding the ambient baseline pattern is detected
-- [ ] 6.6 Update system status reporting and web status / API endpoints to reflect `PIR_MODE` state, arming countdown, active monitoring, and motion recording activity
+- [x] 6.6 Update system status reporting and web status / API endpoints to reflect `PIR_MODE` state, arming countdown, active monitoring, and motion recording activity
 
 ## 7. Hardening and Polish
 

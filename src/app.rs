@@ -599,6 +599,16 @@ impl App {
             button2_was_pressed = b2_down;
             button3_was_pressed = b3_down;
 
+            let arming_countdown = pir_button_controller.arming_countdown_secs(std::time::Instant::now());
+            let recording_remaining = pir_button_controller.remaining_recording_secs(std::time::Instant::now());
+            audio_buffer.update_pir_status(
+                current_mode,
+                pir_button_controller.is_armed(),
+                arming_countdown,
+                pir_detected,
+                recording_remaining,
+            );
+
             if display.is_on() {
                 if current_mode == DeviceMode::Sd {
                     if let Ok(card) = &sd_card {
@@ -609,8 +619,8 @@ impl App {
                 let active_pb = playback_controller.current_playback();
                 let pir_status = crate::status::PirModeStatus {
                     armed: pir_button_controller.is_armed(),
-                    arming_countdown: pir_button_controller.arming_countdown_secs(std::time::Instant::now()),
-                    recording_remaining_secs: pir_button_controller.remaining_recording_secs(std::time::Instant::now()),
+                    arming_countdown,
+                    recording_remaining_secs: recording_remaining,
                 };
                 system_status = SystemStatus::from_runtime_with_sensors(
                     connection.connected,
@@ -628,7 +638,7 @@ impl App {
 
             if !pressed {
                 log::info!(
-                    "Mode {} status (display {}): WiFi: {}, Mic: {}, PIR: {}, SD: {}, Gain: {}%",
+                    "Mode {} status (display {}): WiFi: {}, Mic: {}, PIR: {}, SD: {}, Gain: {}% [PIR: {}]",
                     current_mode.as_str(),
                     if display.is_on() { "ON" } else { "OFF" },
                     if connection.connected { "OK" } else { "KO" },
@@ -636,6 +646,13 @@ impl App {
                     if pir_detected { "ACTIVE" } else { "IDLE" },
                     if sd_status.is_mounted() { "OK" } else { "KO" },
                     gain_percent,
+                    if pir_button_controller.is_armed() {
+                        "ARMED"
+                    } else if arming_countdown.is_some() {
+                        "ARMING"
+                    } else {
+                        "IDLE"
+                    },
                 );
             }
 

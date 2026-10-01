@@ -8,6 +8,18 @@ pub struct PirModeStatus {
     pub recording_remaining_secs: Option<u8>,
 }
 
+impl PirModeStatus {
+    pub fn state_str(&self) -> &'static str {
+        if self.armed {
+            "armed"
+        } else if self.arming_countdown.is_some() {
+            "arming"
+        } else {
+            "idle"
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemStatus {
     pub wifi: bool,

@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -130,6 +130,16 @@ struct AudioBufferInner {
     gain_override_bits: AtomicU32,
     /// The web-override gain as a percentage (0..=100).
     gain_override_percent: AtomicU32,
+    /// Active device mode: 0: STATUS_MODE, 1: LIVE_MODE, 2: SD_MODE, 3: PIR_MODE
+    device_mode: AtomicU8,
+    /// Operational PIR state: 0: idle, 1: arming, 2: armed
+    pir_state: AtomicU8,
+    /// Arming countdown remaining seconds (0 if None, else 1..=10)
+    pir_arming_countdown: AtomicU8,
+    /// Live digital PIR motion sensor detection flag
+    pir_motion_detected: AtomicBool,
+    /// PIR recording remaining seconds (0 if None, else 1..=20)
+    pir_recording_remaining_secs: AtomicU8,
 }
 
 struct AudioBufferState {
@@ -137,6 +147,17 @@ struct AudioBufferState {
     frames: VecDeque<(u64, AudioFrame)>,
     capacity: usize,
     signal_present: bool,
+}
+
+/// Snapshot summary of device mode and PIR operational state for status reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PirStatusSnapshot {
+    pub mode: &'static str,
+    pub state: &'static str,
+    pub armed: bool,
+    pub arming_countdown: Option<u8>,
+    pub motion_detected: bool,
+    pub recording_remaining_secs: Option<u8>,
 }
 
 impl SharedAudioBuffer {
@@ -157,6 +178,11 @@ impl SharedAudioBuffer {
                 gain_override_active: AtomicBool::new(false),
                 gain_override_bits: AtomicU32::new(1.0_f32.to_bits()),
                 gain_override_percent: AtomicU32::new(25),
+                device_mode: AtomicU8::new(0),
+                pir_state: AtomicU8::new(0),
+                pir_arming_countdown: AtomicU8::new(0),
+                pir_motion_detected: AtomicBool::new(false),
+                pir_recording_remaining_secs: AtomicU8::new(0),
             }),
         }
     }
@@ -275,6 +301,62 @@ impl SharedAudioBuffer {
     /// Returns the web-override gain as a percentage (0..=100).
     pub fn gain_override_percent(&self) -> u8 {
         self.inner.gain_override_percent.load(Ordering::Relaxed) as u8
+    }
+
+    /// Updates the atomic PIR and device mode status for status reporting and web endpoints.
+    pub fn update_pir_status(
+        &self,
+        mode: crate::modes::DeviceMode,
+        is_armed: bool,
+        arming_countdown: Option<u8>,
+        motion_detected: bool,
+        recording_remaining_secs: Option<u8>,
+    ) {
+        let mode_val = match mode {
+            crate::modes::DeviceMode::Status => 0,
+            crate::modes::DeviceMode::Live => 1,
+            crate::modes::DeviceMode::Sd => 2,
+            crate::modes::DeviceMode::Pir => 3,
+        };
+        let state_val = if is_armed {
+            2 // armed
+        } else if arming_countdown.is_some() {
+            1 // arming
+        } else {
+            0 // idle
+        };
+        self.inner.device_mode.store(mode_val, Ordering::Relaxed);
+        self.inner.pir_state.store(state_val, Ordering::Relaxed);
+        self.inner.pir_arming_countdown.store(arming_countdown.unwrap_or(0), Ordering::Relaxed);
+        self.inner.pir_motion_detected.store(motion_detected, Ordering::Relaxed);
+        self.inner.pir_recording_remaining_secs.store(recording_remaining_secs.unwrap_or(0), Ordering::Relaxed);
+    }
+
+    /// Returns a summary snapshot of the current PIR and device mode status.
+    pub fn pir_status_summary(&self) -> PirStatusSnapshot {
+        let mode_str = match self.inner.device_mode.load(Ordering::Relaxed) {
+            1 => "LIVE_MODE",
+            2 => "SD_MODE",
+            3 => "PIR_MODE",
+            _ => "STATUS_MODE",
+        };
+        let (state_str, armed) = match self.inner.pir_state.load(Ordering::Relaxed) {
+            1 => ("arming", false),
+            2 => ("armed", true),
+            _ => ("idle", false),
+        };
+        let arming_cd = self.inner.pir_arming_countdown.load(Ordering::Relaxed);
+        let motion = self.inner.pir_motion_detected.load(Ordering::Relaxed);
+        let rec_rem = self.inner.pir_recording_remaining_secs.load(Ordering::Relaxed);
+
+        PirStatusSnapshot {
+            mode: mode_str,
+            state: state_str,
+            armed,
+            arming_countdown: if arming_cd > 0 { Some(arming_cd) } else { None },
+            motion_detected: motion,
+            recording_remaining_secs: if rec_rem > 0 { Some(rec_rem) } else { None },
+        }
     }
 }
 
@@ -404,6 +486,15 @@ impl LiveAudioStream {
                 let gain_percent = status_buffer.current_gain_percent();
                 let override_active = status_buffer.is_gain_override_active();
                 let override_percent = status_buffer.gain_override_percent();
+                let pir = status_buffer.pir_status_summary();
+                let pir_arming_cd_str = match pir.arming_countdown {
+                    Some(cd) => cd.to_string(),
+                    None => "null".to_string(),
+                };
+                let pir_rec_rem_str = match pir.recording_remaining_secs {
+                    Some(rem) => rem.to_string(),
+                    None => "null".to_string(),
+                };
                 let rec_info = status_recorder.current_recording();
                 let (is_rec, rec_fn, rec_dur, rec_frames) = match rec_info {
                     Some(info) => (true, info.filename, info.duration_secs, info.frames_recorded),
@@ -415,8 +506,10 @@ impl LiveAudioStream {
                     None => (false, String::new(), 0, 0),
                 };
                 let body = format!(
-                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{},"playback":{},"playback_filename":"{}","playback_duration":{},"playback_total":{}}}"#,
-                    signal, listeners, gain_percent, override_active, override_percent, is_rec, rec_fn, rec_dur, rec_frames, is_play, pb_fn, pb_dur, pb_total
+                    r#"{{"status":"ok","sample_rate":16000,"channels":1,"format":"pcm16","signal_detected":{},"listeners":{},"gain_percent":{},"gain_override_active":{},"gain_override_percent":{},"device_mode":"{}","pir_state":"{}","pir_armed":{},"pir_arming_countdown":{},"pir_motion_detected":{},"pir_recording_remaining_secs":{},"recording":{},"recording_filename":"{}","recording_duration":{},"recording_frames":{},"playback":{},"playback_filename":"{}","playback_duration":{},"playback_total":{}}}"#,
+                    signal, listeners, gain_percent, override_active, override_percent,
+                    pir.mode, pir.state, pir.armed, pir_arming_cd_str, pir.motion_detected, pir_rec_rem_str,
+                    is_rec, rec_fn, rec_dur, rec_frames, is_play, pb_fn, pb_dur, pb_total
                 );
                 let headers = [
                     ("Content-Type", "application/json"),
@@ -825,6 +918,47 @@ impl LiveAudioStream {
             })
             .map_err(|err| format!("Failed to register /api/playback/stop handler: {err}"))?;
 
+        // ── 1e. PIR Mode API endpoints ──────────────────────────────────────
+        let pir_api_buffer = shared_buffer.clone();
+        main_server
+            .fn_handler("/api/pir*", Method::Get, move |req| -> Result<(), EspIOError> {
+                let pir = pir_api_buffer.pir_status_summary();
+                let pir_arming_cd_str = match pir.arming_countdown {
+                    Some(cd) => cd.to_string(),
+                    None => "null".to_string(),
+                };
+                let pir_rec_rem_str = match pir.recording_remaining_secs {
+                    Some(rem) => rem.to_string(),
+                    None => "null".to_string(),
+                };
+                let body = format!(
+                    r#"{{"status":"ok","device_mode":"{}","pir_state":"{}","armed":{},"arming_countdown":{},"motion_detected":{},"recording_remaining_secs":{}}}"#,
+                    pir.mode, pir.state, pir.armed, pir_arming_cd_str, pir.motion_detected, pir_rec_rem_str
+                );
+                let headers = [
+                    ("Content-Type", "application/json"),
+                    ("Cache-Control", "no-cache"),
+                    ("Access-Control-Allow-Origin", "*"),
+                ];
+                let mut resp = req.into_response(200, Some("OK"), &headers)?;
+                resp.write_all(body.as_bytes())?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /api/pir GET handler: {err}"))?;
+
+        main_server
+            .fn_handler("/api/pir*", Method::Options, |req| -> Result<(), EspIOError> {
+                let headers = [
+                    ("Access-Control-Allow-Origin", "*"),
+                    ("Access-Control-Allow-Methods", "GET, OPTIONS"),
+                    ("Access-Control-Allow-Headers", "*"),
+                    ("Content-Length", "0"),
+                ];
+                let _resp = req.into_response(200, Some("OK"), &headers)?;
+                Ok(())
+            })
+            .map_err(|err| format!("Failed to register /api/pir OPTIONS handler: {err}"))?;
+
         // ── 2. Dedicated Streaming Server (Port 8080) ────────────────────────
         // Pinned to its own FreeRTOS task so that the continuous audio streaming
         // loop never blocks the main HTTP server from handling /gain, /status, etc.
@@ -1107,5 +1241,47 @@ mod tests {
         let (active2, val2) = parse_gain_override_params("/gain", r#"{"override": false, "value": 25}"#);
         assert_eq!(active2, Some(false));
         assert_eq!(val2, Some(25));
+    }
+
+    #[test]
+    fn shared_audio_buffer_pir_status_snapshot_tracking() {
+        let buffer = SharedAudioBuffer::new(5);
+        let initial = buffer.pir_status_summary();
+        assert_eq!(initial.mode, "STATUS_MODE");
+        assert_eq!(initial.state, "idle");
+        assert!(!initial.armed);
+        assert_eq!(initial.arming_countdown, None);
+        assert!(!initial.motion_detected);
+        assert_eq!(initial.recording_remaining_secs, None);
+
+        // Update to PIR mode arming
+        buffer.update_pir_status(
+            crate::modes::DeviceMode::Pir,
+            false,
+            Some(8),
+            false,
+            None,
+        );
+        let arming = buffer.pir_status_summary();
+        assert_eq!(arming.mode, "PIR_MODE");
+        assert_eq!(arming.state, "arming");
+        assert!(!arming.armed);
+        assert_eq!(arming.arming_countdown, Some(8));
+
+        // Update to PIR mode armed with motion and recording
+        buffer.update_pir_status(
+            crate::modes::DeviceMode::Pir,
+            true,
+            None,
+            true,
+            Some(19),
+        );
+        let armed_rec = buffer.pir_status_summary();
+        assert_eq!(armed_rec.mode, "PIR_MODE");
+        assert_eq!(armed_rec.state, "armed");
+        assert!(armed_rec.armed);
+        assert_eq!(armed_rec.arming_countdown, None);
+        assert!(armed_rec.motion_detected);
+        assert_eq!(armed_rec.recording_remaining_secs, Some(19));
     }
 }
